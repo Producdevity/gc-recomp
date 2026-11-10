@@ -17,8 +17,13 @@
 #include "gcrt/gx.hpp"
 #include "gcrt/runtime.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
+#include <vector>
 #include <sys/mman.h>
 #include <unordered_map>
 
@@ -231,6 +236,47 @@ void os_init(gc_ctx*) {}
 std::atomic<std::uint64_t> idle_total_ns{0}, idle_gx_ns{0};
 IdleTime idle_time() { return {idle_total_ns.load(), idle_gx_ns.load()}; }
 
+namespace {
+// Development (GCRT_IDLE_WHY=1): idle time by what the guest's threads wait in, logged every
+// 10 s. Dolphin OS lists its threads from 0x800000DC through each OSThread's active link
+// (0x2FC); a waiting thread (state 0x2C8 == 4) is keyed by its priority (0x2D0), wait queue
+// (0x2DC) and the return addresses on its saved stack (r1 at 0x04 of its context).
+bool in_ram(std::uint32_t a) { return a >= 0x80000000u && a < 0x81800000u; }
+std::string waiting_threads() {
+    std::string key;
+    char text[48];
+    std::uint32_t t = read32(0x800000DCu);
+    for (int n = 0; in_ram(t) && n < 32; ++n, t = read32(t + 0x2FC)) {
+        if (read16(t + 0x2C8) != 4) continue;
+        std::snprintf(text, sizeof text, "[p%d q%08x", static_cast<int>(read32(t + 0x2D0)), read32(t + 0x2DC));
+        key += text;
+        std::uint32_t sp = read32(t + 4);
+        for (int depth = 0; depth < 4 && in_ram(sp); ++depth) {
+            sp = read32(sp);
+            if (!in_ram(sp)) break;
+            std::snprintf(text, sizeof text, " %08x", read32(sp + 4));
+            key += text;
+        }
+        key += "]";
+    }
+    return key;
+}
+void account_idle(const std::string& key, std::uint64_t ns) {
+    static std::unordered_map<std::string, std::uint64_t> by_key;
+    static std::uint64_t since = now_ns();
+    by_key[key] += ns;
+    const std::uint64_t now = now_ns();
+    if (now - since < 10000000000ull) return;
+    std::vector<std::pair<std::uint64_t, std::string>> top;
+    for (const auto& [k, v] : by_key) top.emplace_back(v, k);
+    std::sort(top.rbegin(), top.rend());
+    for (std::size_t i = 0; i < top.size() && i < 6; ++i)
+        log("idle why: %.1f ms/s %s\n", top[i].first / 1e6 / ((now - since) / 1e9), top[i].second.c_str());
+    by_key.clear();
+    since = now;
+}
+} // namespace
+
 } // namespace gcrt
 
 using namespace gcrt;
@@ -289,11 +335,14 @@ __attribute__((noinline)) void gc_spin(gc_ctx* c) {
     if (deliver_pending(c)) return;
     const std::uint64_t since = virtual_time ? 0 : now_ns();
     const bool gx = !virtual_time && gx_busy();
+    static const bool why = std::getenv("GCRT_IDLE_WHY") != nullptr;
+    const std::string waiting = why ? waiting_threads() + (gx ? " gx-busy" : "") : std::string();
     wait_for_event(1000000);
     if (!virtual_time) {
         const std::uint64_t waited = now_ns() - since;
         idle_total_ns += waited;
         if (gx) idle_gx_ns += waited;
+        if (why) account_idle(waiting, waited);
     }
     run_due_events();
     deliver_pending(c);
