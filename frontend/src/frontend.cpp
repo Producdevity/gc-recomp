@@ -33,6 +33,7 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 namespace gcrt {
@@ -337,6 +338,40 @@ void draw_progress(SDL_Window* window, double fraction) {
     SDL_GL_SwapWindow(window);
 }
 
+// The program list shipped beside the executable (the port folder), or empty.
+std::string shipped_program_list() {
+    char path[4096];
+    const ssize_t size = readlink("/proc/self/exe", path, sizeof path - 1);
+    if (size <= 0) return {};
+    const std::string exe(path, static_cast<std::size_t>(size));
+    const std::string list = exe.substr(0, exe.rfind('/') + 1) + "programs.list";
+    return access(list.c_str(), R_OK) == 0 ? list : std::string();
+}
+
+// Builds the listed programs the cache lacks before the game starts, behind a progress
+// bar (first launch, new lists, driver updates): beside the running game a Mali link
+// stalls the GL thread, and draws of programs not built yet are skipped. Programs
+// missing from every list then build in the background.
+void prepare_programs(sg::GlesRenderer& renderer, SDL_Window* window) {
+    auto s = renderer.program_builder();
+    while (s.running && !s.planned) {
+        SDL_Delay(10);
+        s = renderer.program_builder();
+    }
+    if (s.running && s.to_build) {
+        const std::uint64_t start = now_ns();
+        log("Preparing %zu shaders\n", s.to_build);
+        for (; s.running && !s.lists_done; s = renderer.program_builder()) {
+            for (SDL_Event event; SDL_PollEvent(&event);)
+                if (event.type == SDL_QUIT) std::_Exit(0);
+            draw_progress(window, double(s.finished) / double(s.to_build));
+            SDL_Delay(30);
+        }
+        log("Prepared %zu shaders in %.1f s (%zu failed)\n", s.built, (now_ns() - start) / 1e9, s.failed);
+    }
+    renderer.build_programs_in_background();
+}
+
 // The game's code from the player's disc: cache/<ID>.gcbe while it was made from this
 // disc's executable by this translator, otherwise translated now with a progress bar.
 bool translated_program(SDL_Window* window, const GameInfo& game, const std::string& disc_path,
@@ -452,8 +487,12 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
     }
     if (const char* v = std::getenv("GCRT_VERBOSE")) verbosity = std::atoi(v);
     if (pads.navigating)
-        pads.nav.on_exit([](int status) {
+        pads.nav.on_exit([profile, capture](int status) {
             log("nav: plan ended with status %d\n", status);
+            if (profile) {
+                sampler_report(40);
+                if (!capture.empty()) sampler_dump(capture + "/samples.txt");
+            }
             memory_cards_flush();
             std::fflush(nullptr);
             std::_Exit(status);
@@ -492,6 +531,8 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
     limits.direct.snapshot_scale = 1;
     limits.direct.program_cache = cache;
     limits.direct.program_lists = {cache + "/programs.list"};
+    // The port's list of the game's programs, prebuilt at first launch.
+    if (const std::string shipped = shipped_program_list(); !shipped.empty()) limits.direct.program_lists.push_back(shipped);
     static sg::GlesRenderer renderer(limits);
     // Captures read the presented image back before it is swapped out, on the GL thread.
     static std::mutex capture_mutex;
@@ -517,7 +558,7 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
         }
         SDL_GL_SwapWindow(display.window);
     });
-    renderer.build_programs_in_background();
+    prepare_programs(renderer, display.window);
     static StarletRenderer adapter(renderer, game.efb_height);
     if (const char* d = std::getenv("GCRT_EFB_DUMP")) adapter.efb_dump = d;
     StarletOptions gx;
@@ -614,8 +655,24 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
             }
             gx_cpu_ns += thread_cpu_ns() - t;
         });
+        // Frame pacing: fields between new display copies, as the screen shows them.
+        static std::uint64_t paced_copies = 0, paced_field = 0;
+        static unsigned slowest = 0, late = 0, paced = 0;
+        if (const std::uint64_t copies = gx_stats().display_copies; copies != paced_copies) {
+            if (paced_field) {
+                const unsigned span = static_cast<unsigned>(field - paced_field);
+                slowest = std::max(slowest, span);
+                late += span > 2;
+                ++paced;
+            }
+            paced_copies = copies;
+            paced_field = field;
+        }
         std::uint64_t now = now_ns();
         if (now - stats.wall >= 5000000000ull) {
+            if (paced) log("pacing: slowest frame %u fields (%.1f fps), %u of %u frames over 2 fields\n", slowest,
+                           60.0 / std::max(1u, slowest), late, paced);
+            slowest = late = paced = 0;
             const auto& s = gx_stats();
             std::uint64_t cpu = thread_cpu_ns();
             double secs = (now - stats.wall) / 1e9;
@@ -651,6 +708,8 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
                 (r.direct.geometry_misses - stats.gles.direct.geometry_misses) / f,
                 (r.direct.geometry_validated_bytes - stats.gles.direct.geometry_validated_bytes) / 1024.0 / f,
                 (ram_tracking_faults() - stats.faults) / f);
+            if (const auto unready = r.direct.unready_draws - stats.gles.direct.unready_draws)
+                log("unready: %llu draws skipped while their program built\n", static_cast<unsigned long long>(unready));
             static GxSyncStats last_sync;
             const GxSyncStats sync = gx_sync_stats();
             if (sync.snapshot_tokens != last_sync.snapshot_tokens)
@@ -673,6 +732,8 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
         }
     };
     std::string error;
+    // Input scripts and route plans count from the boot, after translation and shader preparation.
+    pads.start = now_ns();
     boot(options, error);
     log("%s: %s\n", game.title, error.c_str());
     return 1;
