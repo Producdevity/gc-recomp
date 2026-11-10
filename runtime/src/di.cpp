@@ -1,9 +1,9 @@
 // Disc interface: command buffer, DMA into main memory and the transfer interrupt.
 #include "gcrt/devices.hpp"
-#include "gcrt/disc.hpp"
 #include "gcrt/gx.hpp"
 #include "gcrt/runtime.hpp"
 #include "gcrt/sampler.hpp"
+#include "starlet/disc/image.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -12,7 +12,7 @@
 namespace gcrt {
 namespace {
 
-std::unique_ptr<Disc> disc;
+std::unique_ptr<starlet::disc::DiscImage> disc;
 
 struct DiscInterface final : Device {
     std::uint32_t sr = 0, cvr = 0, cmd[3] = {}, mar = 0, length = 0, cr = 0, imm = 0, cfg = 0;
@@ -155,12 +155,23 @@ DiscInterface di;
 } // namespace
 
 bool disc_read(std::uint64_t offset, void* destination, std::size_t size) {
-    return disc && disc->read(offset, destination, size);
+    if (!disc) return false;
+    try {
+        disc->read(offset, destination, size);
+        return true;
+    } catch (const starlet::disc::DiscError& e) {
+        log("disc read %llx+%zx: %s\n", (unsigned long long)offset, size, e.what());
+        return false;
+    }
 }
 
 bool di_init(const std::string& path, std::string& error) {
-    disc = open_disc(path, error);
-    if (!disc) return false;
+    try {
+        disc = starlet::disc::open_disc_image(path);
+    } catch (const starlet::disc::DiscError& e) {
+        error = e.what();
+        return false;
+    }
     register_device(0x6000, 0x40, &di);
     return true;
 }

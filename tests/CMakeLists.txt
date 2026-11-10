@@ -1,6 +1,6 @@
 # Disc reader check: compares an RVZ against its ISO byte for byte (needs both images).
 add_executable(gc-disc-compare disc_compare.cpp)
-target_link_libraries(gc-disc-compare PRIVATE gcrt)
+target_link_libraries(gc-disc-compare PRIVATE starlet_disc)
 
 # MEM1 write generations for the GX caches.
 add_executable(gc-ram-tracking-test ram_tracking_run.cpp)
@@ -21,6 +21,17 @@ add_test(NAME dsp_poll COMMAND gc-dsp-poll-test)
 add_executable(gc-input-test input_run.cpp)
 target_link_libraries(gc-input-test PRIVATE gcrt)
 add_test(NAME input_script COMMAND gc-input-test)
+
+# RVZ test images: Starlet's pinned zstd with its compressor, read back by Starlet's reader.
+set(gc_zstd_lib "${GC_STARLET_DIR}/third_party/zstd/lib")
+file(GLOB gc_zstd_compress "${gc_zstd_lib}/compress/*.c")
+add_library(gc_zstd_compress STATIC ${gc_zstd_compress})
+target_link_libraries(gc_zstd_compress PUBLIC starlet_zstd)
+add_executable(gc-rvz-zstd-test rvz_zstd_run.cpp)
+target_link_libraries(gc-rvz-zstd-test PRIVATE starlet_disc gc_zstd_compress)
+add_test(NAME rvz_zstd COMMAND gc-rvz-zstd-test "${CMAKE_CURRENT_BINARY_DIR}")
+add_executable(gc-rvz-zstd rvz_tool.cpp)
+target_link_libraries(gc-rvz-zstd PRIVATE starlet_disc gc_zstd_compress)
 
 # Instruction tests: generated image -> gcrecomp -> C -> runner.
 if(TARGET gcrecomp)

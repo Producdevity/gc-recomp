@@ -1,7 +1,6 @@
 #include "gcrt/frontend.hpp"
 
 #include "gcrt/devices.hpp"
-#include "gcrt/disc.hpp"
 #include "gcrt/gcrt.hpp"
 #include "gcrt/gx_starlet.hpp"
 #include "gcrt/input.hpp"
@@ -10,6 +9,7 @@
 
 #include <SDL.h>
 #include <GLES3/gl31.h>
+#include <starlet/disc/image.hpp>
 #include <starlet/gx/gles/renderer.hpp>
 #ifdef GCRT_WITH_GCBE
 #include "../../tools/nav.hpp"
@@ -18,6 +18,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -340,26 +341,20 @@ void draw_progress(SDL_Window* window, double fraction) {
 // disc's executable by this translator, otherwise translated now with a progress bar.
 bool translated_program(SDL_Window* window, const GameInfo& game, const std::string& disc_path,
                         const std::string& cache, Program& program, std::string& error) {
-    auto disc = open_disc(disc_path, error);
-    if (!disc) return false;
-    std::uint8_t header[0x440], dol_header[0x100];
-    if (!disc->read(0, header, sizeof header) || !disc->read(be32(header + 0x420), dol_header, sizeof dol_header)) {
-        error = "cannot read the disc's executable";
-        return false;
-    }
-    std::uint32_t size = 0;
-    for (int i = 0; i < 18; ++i) {
-        const std::uint32_t offset = be32(dol_header + i * 4), length = be32(dol_header + 0x90 + i * 4);
-        if (length) size = std::max(size, offset + length);
-    }
-    std::vector<std::uint8_t> dol(size);
-    if (!disc->read(be32(header + 0x420), dol.data(), dol.size())) {
-        error = "cannot read the disc's executable";
+    std::array<std::uint8_t, 0x440> header;
+    std::vector<std::uint8_t> dol;
+    try {
+        auto image = starlet::disc::open_disc_image(disc_path);
+        starlet::disc::GameVolume volume(*image);
+        header = volume.boot();
+        dol = volume.main_dol();
+    } catch (const starlet::disc::DiscError& e) {
+        error = e.what();
         return false;
     }
     std::uint8_t sha1[20];
     gcbe::sha1(dol.data(), dol.size(), sha1);
-    const std::string path = cache + "/" + std::string(reinterpret_cast<const char*>(header), 6) + ".gcbe";
+    const std::string path = cache + "/" + std::string(reinterpret_cast<const char*>(header.data()), 6) + ".gcbe";
     if (!gcbe_cache_valid(path.c_str(), sha1, 0)) {
         gcbe::Request request;
         request.dol_bytes = std::move(dol);

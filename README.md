@@ -70,7 +70,7 @@ compare state and memory (`tests/gcbe_fuzz_*`).
   the VI beam and an event queue; a timer thread raises the safepoint flag when an event
   falls due.
 - **Devices.** PI, MI, VI (display interrupts by beam line), SI (four controller ports,
-  transfers and polling), DI (ISO and RVZ images), EXI (IPL chip: RTC, SRAM, UART;
+  transfers and polling), DI (ISO/GCM and RVZ through Starlet's disc module), EXI (IPL chip: RTC, SRAM, UART;
   memory cards), DSP (boot ROM handshake, ARAM DMA, audio DMA), AI (streaming sample
   counter), CP/PE and the write-gather pipe.
 - **Memory cards** are raw card images (slot A: `SAVES/memcard-a.raw`, created as an
@@ -96,6 +96,7 @@ compare state and memory (`tests/gcbe_fuzz_*`).
 ## Building
 
 Host (macOS or Linux, AArch64): the recompiler, runtime, tests and a headless runner.
+Starlet's disc module needs its zstd submodule: `git -C ../starlet submodule update --init third_party/zstd`.
 
 ```sh
 cmake -S . -B build/host -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -116,6 +117,6 @@ Independent implementation. Instruction semantics follow the PowerPC architectur
 the 750CL (Gekko) paired-single and quantization definitions; hardware registers follow
 YAGCD and the Dolphin SDK headers and decompiled SDK sources of the GameCube
 decompilation projects (doldecomp/sms, Moddimation/Yasiki), which also document the
-DSP task and JAudio mail protocols. RVZ follows the format described in Dolphin's
-`docs/WiaAndRvz.md`. No code from Dolphin, DolRecomp, XenonRecomp, N64Recomp,
+DSP task and JAudio mail protocols. The test RVZ writer follows the format described in
+Dolphin's `docs/WiaAndRvz.md`. No code from Dolphin, DolRecomp, XenonRecomp, N64Recomp,
 WiiCompiled, Aurora or other ports is used.

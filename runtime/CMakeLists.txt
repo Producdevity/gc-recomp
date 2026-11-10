@@ -8,7 +8,6 @@ add_library(gcrt STATIC
     src/cpu.cpp
     src/debug_wraps.cpp
     src/di.cpp
-    src/disc.cpp
     src/dsp.cpp
     src/events.cpp
     src/exi.cpp
@@ -30,7 +29,7 @@ add_library(gcrt STATIC
 target_include_directories(gcrt PUBLIC include)
 target_compile_features(gcrt PUBLIC cxx_std_17)
 find_package(Threads REQUIRED)
-target_link_libraries(gcrt PUBLIC starlet_gx Threads::Threads)
+target_link_libraries(gcrt PUBLIC starlet_gx starlet_disc Threads::Threads)
 target_compile_options(gcrt PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>)
 
 # gc_recompile(<target> (DOL <dol> | DISC <iso>) SYMBOLS <symbols.txt> [CONFIG <cfg>] [FILES <n>]
