@@ -70,7 +70,7 @@ bool same_words(const std::uint8_t* a, const std::uint8_t* b, std::uint32_t size
     return true;
 }
 
-constexpr std::uint32_t kText = 0x80003100u, kArea = 0x80300000u, kA = 0x80300000u, kB = 0x80300100u,
+constexpr std::uint32_t kArea = 0x80300000u, kA = 0x80300000u, kB = 0x80300100u,
                         kOut = 0x80300200u, kTable = 0x80301000u, kName = 0x80302000u, kData = 0x80303000u,
                         kSda2 = 0x80310000u, kStack = 0x80380000u;
 constexpr std::uint32_t kAreaSize = 0x10000;   // arguments, tables, records and small-data constants
@@ -181,14 +181,9 @@ int main() {
         {"WriteMTXPS3x3from3x4", hle_WriteMTXPS3x3from3x4}, {"VecNormalizeSafe", hle_VecNormalizeSafe},
         {"NameHashFind", hle_NameHashFind}, {"NameParamGet", hle_NameParamGet}, {"FindEntryByKey", hle_FindEntryByKey}};
     unsigned total_failures = 0;
-    std::uint32_t at = kText;
     for (const auto& n : gcr::natives()) {
-        if (!std::strcmp(n.name, "Nop") || n.support) continue;
-        std::uint32_t address = n.address;
-        if (!address) {
-            address = at;
-            at += static_cast<std::uint32_t>(n.words.size() * 4);
-        }
+        if (!n.address || n.support) continue;
+        const std::uint32_t address = n.address;
         auto it = impl.find(n.name);
         if (it == impl.end()) {
             std::printf("%s: no implementation in this test\n", n.name);

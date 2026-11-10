@@ -43,14 +43,19 @@ if(GC_TESTS AND TARGET gc-ppc-gen)
     target_compile_definitions(gc-ppc-tests-gcbe PRIVATE GCRT_TRANSLATED GCBE_TEST_BLOB="${gcbe_ppc}/tests.gcbe")
     add_dependencies(gc-ppc-tests-gcbe gcbe_ppc_image)
     add_test(NAME ppc_instructions_gcbe COMMAND gc-ppc-tests-gcbe)
+endif()
 
-    # Runtime replacements of SDK functions against their translated guest code.
+# Runtime replacements of SDK functions against their translated guest code, which the test
+# copies from Luigi's Mansion's main.dol.
+set(GC_NATIVES_DOL "" CACHE FILEPATH "Luigi's Mansion (GLME01) main.dol for the natives test")
+if(GC_TESTS AND GC_NATIVES_DOL)
     set(gcbe_nat "${CMAKE_BINARY_DIR}/gcbe-natives")
     file(MAKE_DIRECTORY "${gcbe_nat}")
     add_executable(gc-natives-gen ${gcbe_root}/tests/natives_gen.cpp)
+    target_link_libraries(gc-natives-gen PRIVATE gcbe_translator)
     add_custom_command(OUTPUT "${gcbe_nat}/natives.dol" "${gcbe_nat}/symbols.txt"
-        COMMAND gc-natives-gen "${gcbe_nat}/natives.dol" "${gcbe_nat}/symbols.txt"
-        DEPENDS gc-natives-gen)
+        COMMAND gc-natives-gen "${GC_NATIVES_DOL}" "${gcbe_nat}/natives.dol" "${gcbe_nat}/symbols.txt"
+        DEPENDS gc-natives-gen "${GC_NATIVES_DOL}")
     add_custom_command(OUTPUT "${gcbe_nat}/natives.gcbe"
         COMMAND gcbe --dol "${gcbe_nat}/natives.dol" --symbols "${gcbe_nat}/symbols.txt" --no-natives
                 --out "${gcbe_nat}/natives.gcbe"

@@ -46,7 +46,9 @@ missing from the list become extra entries. Each guest function becomes one C fu
   GQRs.
 
 Configuration directives (`hle`, `save_context`, `function`, `exact`, `skip`) are
-described in `recompiler/image.hpp`.
+described in `recompiler/image.hpp`. Some SDK and game functions are replaced by runtime
+code wherever a function has the same length and hash as the one replaced
+(`recompiler/natives.hpp`); the source holds no game code.
 
 The AArch64 backend (gcbe) translates the same function list with the same guest
 semantics and write-back rules straight to machine code, writing back only registers
@@ -102,6 +104,9 @@ Starlet's disc module needs its zstd submodule: `git -C ../starlet submodule upd
 cmake -S . -B build/host -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build/host && ctest --test-dir build/host
 ```
+
+`-DGC_NATIVES_DOL=main.dol`, with Luigi's Mansion's (GLME01) executable, adds the test that
+compares those replacements with the translated functions they replace.
 
 `-DGC_GAME_DOL=main.dol -DGC_GAME_SYMBOLS=symbols.txt -DGC_GAME_CONFIG=game.cfg` adds
 `gc-headless DISC [SECONDS]`, which runs a game without video or audio output. With
