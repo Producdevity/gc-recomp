@@ -1,0 +1,11 @@
+build/
+# Game data, translation caches and run outputs never belong in the repository.
+*.iso
+*.gcm
+*.rvz
+*.ciso
+*.dol
+*.gcbe
+*.raw
+*.ppm
+*.wav
