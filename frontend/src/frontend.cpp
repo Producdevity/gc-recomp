@@ -20,6 +20,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <csignal>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -29,6 +31,7 @@
 #include <ctime>
 #include <memory>
 #include <mutex>
+#include <pthread.h>
 #include <string>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -436,6 +439,43 @@ bool translated_program(SDL_Window* window, const GameInfo& game, const std::str
 }
 #endif
 
+// The frontend ends a port with SIGTERM, and gptokeyb's exit chord follows it with SIGKILL after
+// 3 s. Quit signals are blocked in every thread and taken by one watcher: the guest thread saves
+// the memory cards at its next retrace, or the watcher does when the guest has not within 500 ms.
+std::atomic<int> quit_signal{0};
+std::atomic<bool> quitting{false};
+
+[[noreturn]] void quit(const char* reason) {
+    if (quitting.exchange(true))
+        for (;;) pause();
+    const std::uint64_t start = now_ns();
+    log("quit: %s\n", reason);
+    memory_cards_flush();
+    log("quit: memory cards saved in %.1f ms\n", (now_ns() - start) / 1e6);
+    std::fflush(nullptr);
+    std::_Exit(0);
+}
+
+const char* quit_reason(int signal) {
+    return signal == SIGTERM ? "SIGTERM" : signal == SIGINT ? "SIGINT" : "SIGHUP";
+}
+
+void watch_quit_signals() {
+    sigset_t signals;
+    sigemptyset(&signals);
+    for (int s : {SIGTERM, SIGINT, SIGHUP}) sigaddset(&signals, s);
+    pthread_sigmask(SIG_BLOCK, &signals, nullptr);
+    std::thread([signals] {
+        int signal = 0;
+        while (sigwait(&signals, &signal) != 0) {}
+        quit_signal.store(signal);
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        static char reason[64];
+        std::snprintf(reason, sizeof reason, "%s; the guest thread did not stop within 500 ms", quit_reason(signal));
+        quit(reason);
+    }).detach();
+}
+
 } // namespace
 
 int run_frontend(const GameInfo& game, int argc, char** argv) {
@@ -445,6 +485,8 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
         return 2;
     }
     setvbuf(stdout, nullptr, _IOLBF, 0);
+    // Before any thread starts, so that every thread inherits the blocked quit signals.
+    watch_quit_signals();
     std::string disc = argv[1], saves = argv[2], cache = argv[3], capture;
     double seconds = 0;
     unsigned capture_every = 60;
@@ -623,13 +665,10 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
             else sampler_start(1000);
             sampling = true;
         }
+        if (const int signal = quit_signal.load(std::memory_order_relaxed)) quit(quit_reason(signal));
         SDL_Event event;
         while (SDL_PollEvent(&event))
-            if (event.type == SDL_QUIT) {
-                memory_cards_flush();
-                std::fflush(nullptr);
-                std::_Exit(0);
-            }
+            if (event.type == SDL_QUIT) quit("window closed");
         pads.update();
         gx_flush();
         if (!capture.empty() && field % capture_every == 0) {
