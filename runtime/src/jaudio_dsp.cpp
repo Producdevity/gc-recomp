@@ -26,6 +26,9 @@
 #include "gcrt/runtime.hpp"
 
 #include <algorithm>
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 #include <cstdio>
 #include <cstdlib>
 
@@ -126,12 +129,15 @@ void JaudioDsp::report(const char* what, u32 value) {
     log("DSP: JAudio: %s\n", text);
 }
 // Sample accelerator reading ARAM sequentially from a byte address.
-JaudioDsp::u8 JaudioDsp::accel8() { return api_.aram_memory()[accel_++ & (kAramSize - 1)]; }
+JaudioDsp::u8 JaudioDsp::accel8() {
+    if (!aram_) aram_ = api_.aram_memory();
+    return aram_[accel_++ & (kAramSize - 1)];
+}
 JaudioDsp::s16 JaudioDsp::accel16() {
     u32 a = accel_ & (kAramSize - 2);
     accel_ = a + 2;
-    const u8* p = api_.aram_memory();
-    return static_cast<s16>((p[a] << 8) | p[a + 1]);
+    if (!aram_) aram_ = api_.aram_memory();
+    return static_cast<s16>((aram_[a] << 8) | aram_[a + 1]);
 }
 
 // ---- Commands and blocks ----------------------------------------------------------------
@@ -240,6 +246,29 @@ JaudioDsp::s16 JaudioDsp::mix_ramp(u16 src, u16 dst, s16 gain, s32 delta) {
     s64 g = s64(gain) << 16;
     if (g == 0 && delta == 0) return gain;
     s16 gm = gain;
+#if defined(__aarch64__)
+    // (dst << 16) + gm * src stays inside 40 bits, so the saturated middle word is
+    // dst + (gm * src >> 16) saturated to 16 bits: eight samples at a time.
+    if ((src & 0xFFF) + kBlock <= 0x1000 && (dst & 0xFFF) + kBlock <= 0x1000) {
+        const s16* in = reinterpret_cast<const s16*>(&m_[src & 0xFFF]);
+        s16* out = reinterpret_cast<s16*>(&m_[dst & 0xFFF]);
+        const auto run = [&](int from, int to, s16 k) {
+            const int16x4_t kk = vdup_n_s16(k);
+            int n = from;
+            for (; n + 8 <= to; n += 8) {
+                const int16x8_t x = vld1q_s16(in + n);
+                const int16x4_t lo = vshrn_n_s32(vmull_s16(vget_low_s16(x), kk), 16);
+                const int16x4_t hi = vshrn_n_s32(vmull_s16(vget_high_s16(x), kk), 16);
+                vst1q_s16(out + n, vqaddq_s16(vld1q_s16(out + n), vcombine_s16(lo, hi)));
+            }
+            for (; n < to; ++n) out[n] = mid_sat((s64(out[n]) << 16) + s64(k) * in[n]);
+        };
+        run(0, 65, gm);
+        g = wrap40(g + delta);
+        run(65, kBlock, mid(g));
+        return mid_sat(g);
+    }
+#endif
     for (int n = 0; n < kBlock; ++n) {
         if (n == 65) {
             g = wrap40(g + delta);
@@ -813,6 +842,27 @@ void JaudioDsp::resample() {
             pos += step;
         }
     } else {
+#if defined(__aarch64__)
+        // Taps, coefficients and output inside data memory without wrapping: a 4-lane
+        // product summed in 64 bits, the same value as the scalar loop.
+        const u32 last_at = (pos + step * (kBlock - 1)) >> 16;
+        if (last_at + 3 < 0x1000 && (RESAMPLE_COEFS & 0xFFF) + 256 <= 0x1000 && (VOICE_OUT & 0xFFF) + kBlock <= 0x1000) {
+            const s16* m = reinterpret_cast<const s16*>(m_);
+            s16* out = reinterpret_cast<s16*>(&m_[VOICE_OUT & 0xFFF]);
+            for (int n = 0; n < kBlock; ++n) {
+                const int32x4_t products = vmull_s16(vld1_s16(m + (RESAMPLE_COEFS & 0xFFF) + ((pos >> 10) & 63) * 4),
+                                                     vld1_s16(m + (pos >> 16)));
+                const s64 acc = round_mid(2 * vaddvq_s64(vpaddlq_s32(products)));
+                out[n] = mid_sat(acc);
+                last = mid(acc);
+                pos += step;
+            }
+            ws(V_HELD, last);
+            m_[V_PHASE] = static_cast<u16>((pos & 0xFFFF) >> 4);
+            copy_words(pos >> 16, V_RESAMPLE_HISTORY, 4);
+            return;
+        }
+#endif
         for (int n = 0; n < kBlock; ++n) {
             u32 taps = ((pos >> 10) & 63) * 4;
             u32 at = pos >> 16;

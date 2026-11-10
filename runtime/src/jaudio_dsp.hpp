@@ -96,6 +96,7 @@ private:
     u32 voice_table_ = 0, fx_table_ = 0, out_left_ = 0, out_right_ = 0, voice_count_ = 0;
     s16 master_gain_ = 0;
     u32 accel_ = 0;
+    const u8* aram_ = nullptr;   // ARAM, allocated once at startup
     u16 ar3_ = 0, filtered_ = 0;
     bool configured_ = false;
     int reports_ = 0;
