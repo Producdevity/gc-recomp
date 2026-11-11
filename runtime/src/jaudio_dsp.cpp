@@ -100,6 +100,9 @@ JaudioDsp::JaudioDsp(DspApi& api, Variant variant) : api_(api), variant_(variant
 
 void JaudioDsp::reset() {
     for (auto& w : m_) w = 0;
+    job_ = nullptr;
+    frame_split_ = true;
+    pending_ = false;
 }
 
 // ---- Data memory and DMA ----------------------------------------------------------------
@@ -121,9 +124,8 @@ void JaudioDsp::copy_words(u32 from, u32 to, u32 count) {
     for (u32 i = 0; i < count; ++i) m_[(to + i) & 0xFFF] = m_[(from + i) & 0xFFF];
 }
 // Anomalies the microcode would not survive cleanly; logged a few times.
-void JaudioDsp::report(const char* what, u32 value) {
-    if (reports_ >= 16) return;
-    ++reports_;
+void JaudioDsp::report(const char* what, u32 value) const {
+    if (reports_.fetch_add(1, std::memory_order_relaxed) >= 16) return;
     char text[128];
     std::snprintf(text, sizeof text, what, value);
     log("DSP: JAudio: %s\n", text);
@@ -142,6 +144,7 @@ JaudioDsp::s16 JaudioDsp::accel16() {
 
 // ---- Commands and blocks ----------------------------------------------------------------
 void JaudioDsp::setup(u16 voices, u32 voice_table, u32 tables, u32 adpcm, u32 effects) {
+    materialize();
     voice_table_ = voice_table;
     fx_table_ = effects;
     dma_in(tables, RESAMPLE_COEFS, early() ? 0x200 : 0x280);
@@ -150,14 +153,39 @@ void JaudioDsp::setup(u16 voices, u32 voice_table, u32 tables, u32 adpcm, u32 ef
     init_modulated_delay();
 }
 
-void JaudioDsp::begin_frame(u32 left, u32 right, u16 level) {
-    out_left_ = left;
-    out_right_ = right;
-    master_gain_ = static_cast<s16>(level);
-    dma_in(fx_table_, FX_PARAMS, 0x40);
+void JaudioDsp::begin_frame(u32 left, u32 right, u16 level, Synthesis* job) {
+    const u16* params = &m_[FX_PARAMS];
+    if (job) {
+        // The parameters as the CPU left them now; an effect send outside the buses keeps
+        // the frame unsplit.
+        Synthesis& s = *job;
+        const u8* p = api_.main_memory(fx_table_ & 0x01FFFFFFu, 0x80);
+        for (u32 i = 0; i < 0x40; ++i) s.fx[i] = p ? static_cast<u16>((p[i * 2] << 8) | p[i * 2 + 1]) : 0;
+        frame_split_ = true;
+        for (int line = 0; line < 4; ++line) {
+            const u16* q = &s.fx[line * 16];
+            if (q[0] && ((q[4] && !separable_bus(q[4])) || (q[6] && !separable_bus(q[6])))) frame_split_ = false;
+        }
+        if (frame_split_) {
+            if (!p) report("DMA from %08x outside RAM", fx_table_);
+            defer(job);
+            s.frame = true;
+            s.left = left;
+            s.right = right;
+            s.level = static_cast<s16>(level);
+            params = s.fx;
+        }
+    }
+    if (!job_) {
+        materialize();
+        out_left_ = left;
+        out_right_ = right;
+        master_gain_ = static_cast<s16>(level);
+        dma_in(fx_table_, FX_PARAMS, 0x40);
+    }
     if (verbosity > 2)
         for (int line = 0; line < 4; ++line) {
-            const u16* p = &m_[FX_PARAMS + line * 16];
+            const u16* p = params + line * 16;
             if (std::equal(p, p + 16, logged_fx_[line])) continue;
             std::copy(p, p + 16, logged_fx_[line]);
             log("DSP: JAudio effect line %d: flags %x ring %u blocks at %08x, sends %04x:%04x %04x:%04x, "
@@ -175,6 +203,12 @@ void JaudioDsp::set_active_mask(u32 high, u32 low) {
 }
 
 void JaudioDsp::prepare_block() {
+    if (job_) job_->prepared = true;
+    else prepare_buses();
+    update_patterns();
+}
+
+void JaudioDsp::prepare_buses() {
     if (early()) {
         // Fronts start as the previous block's rear left and its complement.
         for (int n = 0; n < kBlock; ++n) {
@@ -195,7 +229,6 @@ void JaudioDsp::prepare_block() {
             for (int n = 0; n < kBlock; ++n) m_[bus + n] = 0;
     }
     prepare_effects();
-    update_patterns();
 }
 
 // GCRT_NOMIX=1 skips the voices (diagnostics: the buses and effect lines still run).
@@ -212,6 +245,11 @@ void JaudioDsp::render_voices() {
 }
 
 void JaudioDsp::finish_block() {
+    if (job_) job_->finished = true;
+    else finish_buses();
+}
+
+void JaudioDsp::finish_buses() {
     modulated_delay();
     add_scaled(BUS_AUX_CENTER, BUS_FRONT_LEFT, kBlock, 0x5A82);
     add_scaled(BUS_AUX_CENTER, BUS_FRONT_RIGHT, kBlock, 0x5A82);
@@ -229,6 +267,110 @@ void JaudioDsp::finish_block() {
     finish_effects();
 }
 
+// ---- Split between threads -------------------------------------------------------------------
+void JaudioDsp::set_drain(std::function<void()> drain) { drain_ = std::move(drain); }
+
+void JaudioDsp::defer(Synthesis* job) {
+    if (job_ || !frame_split_) return;
+    job->frame = job->prepared = job->finished = false;
+    job->coefs_taken = false;
+    job->mixes.clear();
+    job->resamples.clear();
+    job->samples.clear();
+    job_ = job;
+}
+
+JaudioDsp::Synthesis* JaudioDsp::take_finished() {
+    if (!job_ || !job_->finished) return nullptr;
+    Synthesis* job = job_;
+    job_ = nullptr;
+    return job;
+}
+
+void JaudioDsp::undefer() {
+    if (!job_) return;
+    materialize();
+    Synthesis* job = job_;
+    job_ = nullptr;
+    drain_();
+    synthesize(*job);
+    job->frame = job->prepared = job->finished = false;
+}
+
+void JaudioDsp::synthesize(Synthesis& s) {
+    for (const Synthesis::Resample& r : s.resamples)
+        interpolate(reinterpret_cast<const s16*>(s.coefs), &s.samples[r.raw], r.phase, r.pitch, 0, kBlock,
+                    &s.samples[r.out]);
+    if (s.frame) {
+        std::copy(s.fx, s.fx + 0x40, &m_[FX_PARAMS]);
+        out_left_ = s.left;
+        out_right_ = s.right;
+        master_gain_ = s.level;
+    }
+    if (s.prepared) prepare_buses();
+    for (const Synthesis::Mix& x : s.mixes) mix_samples(&s.samples[x.samples], x.bus, x.gain, x.delta);
+    if (s.finished) finish_buses();
+}
+
+// Destinations a recorded mix may name: bus memory, not wrapping.
+bool JaudioDsp::separable_bus(u16 bus) {
+    u32 at = bus & 0xFFF;
+    return (at >= 0x900 && at + kBlock <= 0xB00) || (at >= 0xC00 && at + kBlock <= 0x1000);
+}
+
+// Whether the voice in the voice block stays on the voice side: raw samples below 0x900,
+// main-memory PCM scratch inside 0xB00-0xBFF, no generator that reads the 0x0CA0 bus, at
+// most 8 FIR taps (more spill the coefficients into the modulated delay's words), delay
+// history inside the voice block, sends to bus memory.
+bool JaudioDsp::separable_voice() const {
+    if (!m_[V_PAUSED]) {
+        u16 type = m_[V_TYPE];
+        u32 needed = (u32(m_[V_PHASE]) + 80u * m_[V_PITCH]) >> 12;
+        bool sampled = type == SOURCE_AFC_HQ || type == SOURCE_AFC_LQ || type == SOURCE_PCM8_ARAM ||
+                       type == SOURCE_PCM16_ARAM || type == SOURCE_PCM16_MRAM_RESAMPLED;
+        if (sampled && RAW + needed + 32 > 0x900) return false;
+        if (type == SOURCE_PCM16_MRAM_RESAMPLED && needed + 2 > 0x100) return false;
+        if (!sampled && type != SOURCE_PCM16_MRAM_DIRECT && ((type & 0x3F) == 0x02 || (type & 0x3F) == 0x0A))
+            return false;
+    }
+    if ((m_[V_FILTER] & 0x1F) > 8) return false;
+    if (m_[V_AUTO_MIXER]) return true;
+    if (m_[V_DELAY_COUNT] > V_DELAY_HISTORY_END + 1 - VOICE) return false;
+    for (int k = 0; k < 6; ++k)
+        if (u16 bus = m_[V_SENDS + k * 4]; bus && !separable_bus(bus)) return false;
+    return true;
+}
+
+// A mix into a bus: run here, or recorded with the source as it is now.
+JaudioDsp::s16 JaudioDsp::mix(u16 src, u16 dst, s16 gain, s32 delta) {
+    if (!job_) return mix_ramp(src, dst, gain, delta);
+    if (gain == 0 && delta == 0) return gain;
+    return record(capture(src), dst, gain, delta);
+}
+JaudioDsp::u32 JaudioDsp::capture(u16 src) {
+    std::vector<s16>& samples = job_->samples;
+    if (voice_out_ != kNone) {
+        // Output words from the DSP thread's resampling, after the words before them as
+        // they are now: one window per voice, as no send writes it.
+        if (!prefix_taken_) {
+            for (u32 n = 0; n < voice_prefix_; ++n)
+                samples[voice_out_ - voice_prefix_ + n] = rs(VOICE_OUT - voice_prefix_ + n);
+            prefix_taken_ = true;
+        }
+        return voice_out_ - u16(VOICE_OUT - src);
+    }
+    const u32 at = static_cast<u32>(samples.size());
+    samples.resize(at + kBlock);
+    for (int n = 0; n < kBlock; ++n) samples[at + n] = rs(src + n);
+    return at;
+}
+// The gain mix_ramp returns.
+JaudioDsp::s16 JaudioDsp::record(u32 samples, u16 dst, s16 gain, s32 delta) {
+    if (gain == 0 && delta == 0) return gain;
+    job_->mixes.push_back({samples, dst, gain, delta});
+    return mid_sat(wrap40((s64(gain) << 16) + delta));
+}
+
 // ---- Bus arithmetic ------------------------------------------------------------------------
 // dst = gain * src, doubled product, rounded; 16-bit mode.
 void JaudioDsp::copy_scaled(u16 src, u16 dst, int count, s16 gain) {
@@ -243,14 +385,29 @@ void JaudioDsp::add_scaled(u16 src, u16 dst, int count, s16 gain) {
 // dst += gain * src / 65536 with saturation. The gain moves by delta (a 16.16 step)
 // once, after the 65th sample. Returns the new gain.
 JaudioDsp::s16 JaudioDsp::mix_ramp(u16 src, u16 dst, s16 gain, s32 delta) {
+    if ((src & 0xFFF) + kBlock <= 0x1000)
+        return mix_samples(reinterpret_cast<const s16*>(&m_[src & 0xFFF]), dst, gain, delta);
+    s64 g = s64(gain) << 16;
+    if (g == 0 && delta == 0) return gain;
+    s16 gm = gain;
+    for (int n = 0; n < kBlock; ++n) {
+        if (n == 65) {
+            g = wrap40(g + delta);
+            gm = mid(g);
+        }
+        ws(dst + n, mid_sat((s64(rs(dst + n)) << 16) + s64(gm) * rs(src + n)));
+    }
+    return mid_sat(g);
+}
+// The same from 80 samples at in (read as the mix proceeds).
+JaudioDsp::s16 JaudioDsp::mix_samples(const s16* in, u16 dst, s16 gain, s32 delta) {
     s64 g = s64(gain) << 16;
     if (g == 0 && delta == 0) return gain;
     s16 gm = gain;
 #if defined(__aarch64__)
     // (dst << 16) + gm * src stays inside 40 bits, so the saturated middle word is
     // dst + (gm * src >> 16) saturated to 16 bits: eight samples at a time.
-    if ((src & 0xFFF) + kBlock <= 0x1000 && (dst & 0xFFF) + kBlock <= 0x1000) {
-        const s16* in = reinterpret_cast<const s16*>(&m_[src & 0xFFF]);
+    if ((dst & 0xFFF) + kBlock <= 0x1000) {
         s16* out = reinterpret_cast<s16*>(&m_[dst & 0xFFF]);
         const auto run = [&](int from, int to, s16 k) {
             const int16x4_t kk = vdup_n_s16(k);
@@ -274,7 +431,7 @@ JaudioDsp::s16 JaudioDsp::mix_ramp(u16 src, u16 dst, s16 gain, s32 delta) {
             g = wrap40(g + delta);
             gm = mid(g);
         }
-        ws(dst + n, mid_sat((s64(rs(dst + n)) << 16) + s64(gm) * rs(src + n)));
+        ws(dst + n, mid_sat((s64(rs(dst + n)) << 16) + s64(gm) * in[n]));
     }
     return mid_sat(g);
 }
@@ -283,12 +440,17 @@ void JaudioDsp::master_gain(u16 bus) {
     for (int n = 0; n < kBlock; ++n) ws(bus + n, mid_sat(wrap40((s64(rs(bus + n)) * master_gain_) << 4)));
 }
 // In-place FIR: data[i] = sum c[k] * data[i + k]; doubled products, rounded, 16-bit mode.
-void JaudioDsp::fir(u16 coefs, u16 data, int taps) {
-    copy_words(coefs, COEF_SCRATCH, taps);
+// The coefficients go through scratch words, which only the FIR reads; the voice side
+// of a split block (at most 8 taps) reads them in place, leaving the scratch to the buses.
+void JaudioDsp::fir(u16 coefs, u16 data, int taps, bool scratch) {
+    if (scratch) {
+        copy_words(coefs, COEF_SCRATCH, taps);
+        coefs = COEF_SCRATCH;
+    }
     if (taps != 2 && taps != 4 && taps != 8) report("FIR with %u taps (coefficient wrap unverified)", taps);
     for (int i = 0; i < kBlock; ++i) {
         s64 p = 0;
-        for (int k = 0; k < taps; ++k) p += 2 * s64(rs(COEF_SCRATCH + k)) * rs(data + i + k);
+        for (int k = 0; k < taps; ++k) p += 2 * s64(rs(coefs + k)) * rs(data + i + k);
         ws(data + i, mid(round_mid(p)));
     }
 }
@@ -425,6 +587,9 @@ void JaudioDsp::modulated_delay() {
 void JaudioDsp::render_voice(u32 address) {
     dma_in(address, VOICE, 0xC0);
     if (!m_[V_ENABLED] || m_[V_DONE]) return;
+    voice_out_ = kNone;
+    if (job_ && !separable_voice()) undefer();
+    if (pending_ && !writes_voice_out()) materialize();
     if (verbosity > 2 && m_[V_RESET])
         log("DSP: JAudio voice %08x start: type %02x pitch %04x base %08x end %08x loop %d/%08x filter %02x "
             "dist %04x mixer %s sends %04x:%04x %04x:%04x %04x:%04x delays %u: %04x %04x %04x iir %04x %04x %04x %04x\n",
@@ -447,20 +612,21 @@ void JaudioDsp::render_voice(u32 address) {
                 afc_buffered(needed);
             else
                 afc_aligned(needed);
-            resample();
+            resample_voice();
         } else if (pcm) {
             pcm_aram(needed, type == SOURCE_PCM16_ARAM);
-            resample();
+            resample_voice();
         } else if (type == SOURCE_PCM16_MRAM_DIRECT) {
             ar3_ = VOICE_OUT;
             pcm_mram(kBlock);
         } else if (type == SOURCE_PCM16_MRAM_RESAMPLED) {
             pcm_mram(needed);
-            resample();
+            resample_voice();
         } else {
             generate(type);
         }
     }
+    pending_ = voice_out_ != kNone;
     filter_voice();
     if (early()) {
         mix_sends();
@@ -831,52 +997,115 @@ JaudioDsp::u16 JaudioDsp::pattern(u16 table, u16 phase, u16 pitch, bool modulate
 // prepended; at a step of 4.0 or more the oldest tap is taken unfiltered.
 void JaudioDsp::resample() {
     copy_words(V_RESAMPLE_HISTORY, RAW - 4, 4);
-    u16 pitch = m_[V_PITCH];
-    u32 step = u32(pitch) << 4;
-    u32 pos = (u32(RAW - 4) << 16) | u16(m_[V_PHASE] << 4);
+    const u16 phase = m_[V_PHASE], pitch = m_[V_PITCH];
+    const s16 last = interpolate(reinterpret_cast<const s16*>(&m_[RESAMPLE_COEFS]),
+                                 reinterpret_cast<const s16*>(&m_[RAW - 4]), phase, pitch, 0, kBlock,
+                                 reinterpret_cast<s16*>(&m_[VOICE_OUT]));
+    end_resample(phase, pitch, last);
+}
+// Samples from..to of that interpolation; raw starts with the history. Returns the last
+// one's accumulator middle word (unsaturated). From RAW - 4, the taps end below 0xA90
+// (1295 samples at most), so data memory never wraps.
+JaudioDsp::s16 JaudioDsp::interpolate(const s16* coefs, const s16* raw, u16 phase, u16 pitch, int from, int to,
+                                      s16* out) {
+    const u32 step = u32(pitch) << 4;
+    u32 pos = u32(u16(phase << 4)) + step * u32(from);
     s16 last = 0;
     if ((pitch >> 12) >= 4) {
-        for (int n = 0; n < kBlock; ++n) {
-            last = rs(pos >> 16);
-            ws(VOICE_OUT + n, last);
+        for (int n = from; n < to; ++n) {
+            last = raw[pos >> 16];
+            out[n] = last;
             pos += step;
         }
-    } else {
-#if defined(__aarch64__)
-        // Taps, coefficients and output inside data memory without wrapping: a 4-lane
-        // product summed in 64 bits, the same value as the scalar loop.
-        const u32 last_at = (pos + step * (kBlock - 1)) >> 16;
-        if (last_at + 3 < 0x1000 && (RESAMPLE_COEFS & 0xFFF) + 256 <= 0x1000 && (VOICE_OUT & 0xFFF) + kBlock <= 0x1000) {
-            const s16* m = reinterpret_cast<const s16*>(m_);
-            s16* out = reinterpret_cast<s16*>(&m_[VOICE_OUT & 0xFFF]);
-            for (int n = 0; n < kBlock; ++n) {
-                const int32x4_t products = vmull_s16(vld1_s16(m + (RESAMPLE_COEFS & 0xFFF) + ((pos >> 10) & 63) * 4),
-                                                     vld1_s16(m + (pos >> 16)));
-                const s64 acc = round_mid(2 * vaddvq_s64(vpaddlq_s32(products)));
-                out[n] = mid_sat(acc);
-                last = mid(acc);
-                pos += step;
-            }
-            ws(V_HELD, last);
-            m_[V_PHASE] = static_cast<u16>((pos & 0xFFFF) >> 4);
-            copy_words(pos >> 16, V_RESAMPLE_HISTORY, 4);
-            return;
-        }
-#endif
-        for (int n = 0; n < kBlock; ++n) {
-            u32 taps = ((pos >> 10) & 63) * 4;
-            u32 at = pos >> 16;
-            s64 p = 0;
-            for (int t = 0; t < 4; ++t) p += 2 * s64(rs(RESAMPLE_COEFS + taps + t)) * rs(at + t);
-            s64 acc = round_mid(p);
-            ws(VOICE_OUT + n, mid_sat(acc));
-            last = mid(acc);
-            pos += step;
-        }
+        return last;
     }
+    for (int n = from; n < to; ++n) {
+#if defined(__aarch64__)
+        // A 4-lane product summed in 64 bits: the same value as the scalar sum.
+        const int32x4_t products = vmull_s16(vld1_s16(coefs + ((pos >> 10) & 63) * 4), vld1_s16(raw + (pos >> 16)));
+        const s64 acc = round_mid(2 * vaddvq_s64(vpaddlq_s32(products)));
+#else
+        const s16* c = coefs + ((pos >> 10) & 63) * 4;
+        const s16* x = raw + (pos >> 16);
+        s64 p = 0;
+        for (int t = 0; t < 4; ++t) p += 2 * s64(c[t]) * x[t];
+        const s64 acc = round_mid(p);
+#endif
+        out[n] = mid_sat(acc);
+        last = mid(acc);
+        pos += step;
+    }
+    return last;
+}
+// Held sample, phase and history after the block.
+void JaudioDsp::end_resample(u16 phase, u16 pitch, s16 last) {
+    const u32 pos = u32(u16(phase << 4)) + (u32(pitch) << 4) * kBlock;
     ws(V_HELD, last);
     m_[V_PHASE] = static_cast<u16>((pos & 0xFFFF) >> 4);
-    copy_words(pos >> 16, V_RESAMPLE_HISTORY, 4);
+    copy_words(RAW - 4 + (pos >> 16), V_RESAMPLE_HISTORY, 4);
+}
+
+// A split block resamples on the DSP thread when the voice has no filter: here only the
+// samples the voice block keeps (the held sample and the delay history), and a copy of
+// the raw buffer goes with the job. The other output words stay unwritten until a voice
+// that reads them without writing them (materialize).
+void JaudioDsp::resample_voice() {
+    const bool iir = (m_[V_FILTER] & 0x20) && !(m_[V_IIR_COEFS + 3] == 0 && m_[V_IIR_COEFS + 2] == 0 &&
+                                                m_[V_IIR_COEFS + 1] == 0 && m_[V_IIR_COEFS] == 0x7FFF);
+    if (!job_ || m_[V_DIST_COEF] || (m_[V_FILTER] & 0x1F) || iir) return resample();
+    const bool positional = m_[V_AUTO_MIXER] != 0;
+    const int kept = positional ? 1 : std::clamp<int>(m_[V_DELAY_COUNT], 1, kBlock);
+    u16 prefix = 0;
+    if (!positional)
+        for (int k = 0; k < 6; ++k)
+            if (m_[V_SENDS + k * 4]) prefix = std::max<u16>(prefix, m_[V_SENDS + k * 4 + 3] & 0xFF);
+    copy_words(V_RESAMPLE_HISTORY, RAW - 4, 4);
+    const u16 phase = m_[V_PHASE], pitch = m_[V_PITCH];
+    const s16* raw = reinterpret_cast<const s16*>(&m_[RAW - 4]);
+    const s16 last = interpolate(reinterpret_cast<const s16*>(&m_[RESAMPLE_COEFS]), raw, phase, pitch, kBlock - kept,
+                                 kBlock, reinterpret_cast<s16*>(&m_[VOICE_OUT]));
+    Synthesis& s = *job_;
+    if (!s.coefs_taken) {
+        std::copy(&m_[RESAMPLE_COEFS], &m_[RESAMPLE_COEFS + 0x100], s.coefs);
+        s.coefs_taken = true;
+    }
+    const u32 step = u32(pitch) << 4, end = u32(u16(phase << 4)) + step * (kBlock - 1);
+    const u32 words = (end >> 16) + ((pitch >> 12) >= 4 ? 1 : 4);
+    const u32 at = static_cast<u32>(s.samples.size());
+    s.samples.resize(at + words + prefix + kBlock);
+    std::copy(raw, raw + words, &s.samples[at]);
+    voice_out_ = at + words + prefix;
+    voice_prefix_ = prefix;
+    prefix_taken_ = false;
+    s.resamples.push_back({at, voice_out_, phase, pitch});
+    pending_phase_ = phase;
+    pending_pitch_ = pitch;
+    end_resample(phase, pitch, last);
+}
+
+// Whether the voice in the voice block writes all 80 output words before reading them:
+// all but the sources that generate nothing.
+bool JaudioDsp::writes_voice_out() const {
+    if (m_[V_PAUSED]) return true;
+    u16 type = m_[V_TYPE];
+    if (type == SOURCE_AFC_HQ || type == SOURCE_AFC_LQ || type == SOURCE_PCM8_ARAM || type == SOURCE_PCM16_ARAM ||
+        type == SOURCE_PCM16_MRAM_DIRECT || type == SOURCE_PCM16_MRAM_RESAMPLED)
+        return true;
+    switch (type & 0x3F) {
+    case 0x00: case 0x01: case 0x02: case 0x03: case 0x04: case 0x06: case 0x07: case 0x0A: case 0x0B: case 0x0C:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// The output words of the last voice that resampled on the DSP thread, from its raw
+// buffer and table, which no voice has written since.
+void JaudioDsp::materialize() {
+    if (!pending_) return;
+    pending_ = false;
+    interpolate(reinterpret_cast<const s16*>(&m_[RESAMPLE_COEFS]), reinterpret_cast<const s16*>(&m_[RAW - 4]),
+                pending_phase_, pending_pitch_, 0, kBlock, reinterpret_cast<s16*>(&m_[VOICE_OUT]));
 }
 
 // ---- Voice filters ---------------------------------------------------------------------------
@@ -899,7 +1128,7 @@ void JaudioDsp::filter_voice() {
     if (int taps = m_[V_FILTER] & 0x1F) {
         filtered_ = static_cast<u16>(VOICE_OUT - taps);
         copy_words(V_FIR_HISTORY, filtered_, taps);
-        fir(V_FIR_COEFS, filtered_, taps);
+        fir(V_FIR_COEFS, filtered_, taps, !job_);
         copy_words(filtered_ + kBlock, V_FIR_HISTORY, taps);
     }
     if ((m_[V_FILTER] & 0x20) && !(m_[V_IIR_COEFS + 3] == 0 && m_[V_IIR_COEFS + 2] == 0 &&
@@ -951,7 +1180,7 @@ void JaudioDsp::mix_sends() {
         u16 delay = word & 0xFF;
         u16 wanted = (word & 0x8000) ? (0xFF00 | (word >> 8)) : (word >> 8);
         if (wanted != delay) ws(send + 3, mid_sat((s64(s16(word)) + (wanted > delay ? 1 : -1)) << 16));
-        if (bus) current = mix_ramp(static_cast<u16>(filtered_ - delay), bus, current, delta);
+        if (bus) current = mix(static_cast<u16>(filtered_ - delay), bus, current, delta);
         ws(send + 2, current);
     }
     for (int j = 0; j < kept; ++j) m_[(V_DELAY_HISTORY_END - j) & 0xFFF] = m_[(filtered_ + 79 - j) & 0xFFF];
@@ -989,8 +1218,12 @@ void JaudioDsp::mix_positional() {
         ws(SCRATCH_B00 + 4 + i, gain[i]);
         ws(SCRATCH_B00 + 12 + i, step[i]);
     }
-    for (int i = 0; i < 8; ++i)
-        mix_ramp(filtered_, kPositionalDestinations[i], gain[i], static_cast<s32>((s64(step[i]) << 16) >> 5));
+    const u32 samples = job_ ? capture(filtered_) : 0;
+    for (int i = 0; i < 8; ++i) {
+        const s32 delta = static_cast<s32>((s64(step[i]) << 16) >> 5);
+        if (job_) record(samples, kPositionalDestinations[i], gain[i], delta);
+        else mix_ramp(filtered_, kPositionalDestinations[i], gain[i], delta);
+    }
 }
 
 } // namespace gcrt
