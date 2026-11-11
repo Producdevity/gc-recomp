@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <vector>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -161,7 +162,48 @@ void hle_VecNormalizeSafe(gc_ctx*);
 void hle_NameHashFind(gc_ctx*);
 void hle_NameParamGet(gc_ctx*);
 void hle_FindEntryByKey(gc_ctx*);
+void hle_sinf(gc_ctx*);
+void hle_cosf(gc_ctx*);
 }
+
+namespace {
+#ifdef GCBE_NATIVES_SMS_DOL
+// Super Mario Sunshine's data sections, for its natives' constants and tables (r2 = its SDA2
+// base, set by __init_registers).
+constexpr std::uint32_t kSunshineSda2 = 0x80416BA0u;
+bool load_sunshine_data() {
+    std::FILE* f = std::fopen(GCBE_NATIVES_SMS_DOL, "rb");
+    if (!f) return false;
+    std::vector<std::uint8_t> dol;
+    for (int ch; (ch = std::fgetc(f)) != EOF;) dol.push_back(static_cast<std::uint8_t>(ch));
+    std::fclose(f);
+    const auto be = [&](std::size_t at) {
+        return std::uint32_t(dol[at]) << 24 | std::uint32_t(dol[at + 1]) << 16 | std::uint32_t(dol[at + 2]) << 8 | dol[at + 3];
+    };
+    for (int section = 7; section < 18; ++section) {
+        const std::uint32_t offset = be(section * 4), address = be(0x48 + section * 4), size = be(0x90 + section * 4);
+        for (std::uint32_t k = 0; k + 4 <= size; k += 4) gcrt::write32(address + k, be(offset + k));
+    }
+    return true;
+}
+#endif
+// Arguments for sinf and cosf: the angles games pass (radians up to a few turns, degrees
+// converted, accumulated phases), then extremes and arbitrary bit patterns.
+float pick_angle(unsigned run) {
+    switch (run % 8) {
+    case 0: return pick_float();
+    case 1: {
+        std::uint32_t bits = rng();
+        float f;
+        std::memcpy(&f, &bits, 4);
+        return f;
+    }
+    case 2: return static_cast<float>(static_cast<std::int32_t>(rng() % 2000001) - 1000000) * 1e-3f;   // +-1000
+    case 3: return static_cast<float>(static_cast<std::int32_t>(rng() % 65536) - 32768) * (3.14159265f / 32768.0f);
+    default: return static_cast<float>(static_cast<std::int32_t>(rng() % 2000001) - 1000000) * 1e-5f;  // +-10
+    }
+}
+} // namespace
 
 int main() {
     if (!gcrt::memory_init()) return 1;
@@ -179,10 +221,20 @@ int main() {
         {"PSVECScale", hle_PSVECScale}, {"PSVECNormalize", hle_PSVECNormalize}, {"PSVECSquareMag", hle_PSVECSquareMag},
         {"PSVECCrossProduct", hle_PSVECCrossProduct}, {"PSVECMag", hle_PSVECMag}, {"WriteMTXPS4x3", hle_WriteMTXPS4x3},
         {"WriteMTXPS3x3from3x4", hle_WriteMTXPS3x3from3x4}, {"VecNormalizeSafe", hle_VecNormalizeSafe},
-        {"NameHashFind", hle_NameHashFind}, {"NameParamGet", hle_NameParamGet}, {"FindEntryByKey", hle_FindEntryByKey}};
+        {"NameHashFind", hle_NameHashFind}, {"NameParamGet", hle_NameParamGet}, {"FindEntryByKey", hle_FindEntryByKey},
+        {"sinf", hle_sinf}, {"cosf", hle_cosf}};
+#ifdef GCBE_NATIVES_SMS_DOL
+    if (!load_sunshine_data()) {
+        std::fprintf(stderr, "cannot read %s\n", GCBE_NATIVES_SMS_DOL);
+        return 1;
+    }
+    const bool sunshine = true;
+#else
+    const bool sunshine = false;
+#endif
     unsigned total_failures = 0;
     for (const auto& n : gcr::natives()) {
-        if (!n.address || n.support) continue;
+        if (!n.address || n.support || (n.sunshine && !sunshine)) continue;
         const std::uint32_t address = n.address;
         auto it = impl.find(n.name);
         if (it == impl.end()) {
@@ -194,6 +246,7 @@ int main() {
         const bool lookup = name == "NameHashFind" || name == "NameParamGet";
         const bool writer = name.rfind("WriteMTXPS", 0) == 0;
         const bool entries = name == "FindEntryByKey";
+        const bool trig = name == "sinf" || name == "cosf";
         unsigned failures = 0;
         const unsigned runs = 20000;
         for (unsigned r = 0; r < runs; ++r) {
@@ -201,7 +254,13 @@ int main() {
             guest.mem = gc_mem;
             guest.r[1] = kStack;
             guest.r[2] = kSda2;
-            if (entries) {
+            if (trig) {
+#ifdef GCBE_NATIVES_SMS_DOL
+                guest.r[2] = kSunshineSda2;
+#endif
+                guest.lr = 0x80001234u + 4 * (r % 16);
+                guest.f[1] = guest.ps1[1] = pick_angle(r);
+            } else if (entries) {
                 entry_case(guest, r);
             } else if (lookup) {
                 lookup_case(guest, r);
@@ -241,7 +300,10 @@ int main() {
             gc_ctx native = guest;
             gc_gp.fill = fill_at;
             std::memset(gc_gp.bytes, 0, sizeof gc_gp.bytes);
+            gcrt::write32(kStack + 4, 0);
             gc_call(&guest, address);
+            const std::uint32_t lr_translated = gcrt::read32(kStack + 4);
+            gcrt::write32(kStack + 4, 0);
             gc_gather fifo_translated = gc_gp;
             std::memcpy(translated, gcrt::host(kArea), kAreaSize);
             std::memcpy(gcrt::host(kArea), saved, kAreaSize);
@@ -250,7 +312,10 @@ int main() {
             it->second(&native);
             const bool fifo_same = fifo_translated.fill == gc_gp.fill &&
                                    same_words(fifo_translated.bytes, gc_gp.bytes, (gc_gp.fill + 3) & ~3u);
-            const bool same = same_words(translated, gcrt::host(kArea), kAreaSize) && fifo_same &&
+            const bool same = trig ? same_double(guest.f[1], native.f[1]) && same_double(guest.ps1[1], native.ps1[1]) &&
+                                         lr_translated == native.lr && gcrt::read32(kStack + 4) == native.lr &&
+                                         same_words(translated, gcrt::host(kArea), kAreaSize)
+                                   : same_words(translated, gcrt::host(kArea), kAreaSize) && fifo_same &&
                               guest.r[3] == native.r[3] && guest.r[4] == native.r[4] && guest.r[1] == native.r[1] &&
                               same_double(guest.f[1], native.f[1]) && same_double(guest.ps1[1], native.ps1[1]) &&
                               same_double(guest.f[2], native.f[2]) && same_double(guest.ps1[2], native.ps1[2]);

@@ -70,7 +70,7 @@ const Symbol kRuntime[] = {
     {"gc_gp", (const void*)&gc_gp}, {"gc_gather_burst", (const void*)&gc_gather_burst},
     {"hle_Nop", (const void*)&hle_Nop}, {"hle_PSMTXConcat", (const void*)&hle_PSMTXConcat},
     {"hle_PSVECAdd", (const void*)&hle_PSVECAdd}, {"hle_PSVECSubtract", (const void*)&hle_PSVECSubtract}, {"hle_PSVECScale", (const void*)&hle_PSVECScale}, {"hle_PSVECNormalize", (const void*)&hle_PSVECNormalize}, {"hle_PSVECSquareMag", (const void*)&hle_PSVECSquareMag}, {"hle_PSVECCrossProduct", (const void*)&hle_PSVECCrossProduct},
-    {"hle_PSVECMag", (const void*)&hle_PSVECMag}, {"hle_WriteMTXPS4x3", (const void*)&hle_WriteMTXPS4x3},
+    {"hle_PSVECMag", (const void*)&hle_PSVECMag}, {"hle_sinf", (const void*)&hle_sinf}, {"hle_cosf", (const void*)&hle_cosf}, {"hle_WriteMTXPS4x3", (const void*)&hle_WriteMTXPS4x3},
     {"hle_WriteMTXPS3x3from3x4", (const void*)&hle_WriteMTXPS3x3from3x4}, {"hle_VecNormalizeSafe", (const void*)&hle_VecNormalizeSafe},
     {"hle_NameHashFind", (const void*)&hle_NameHashFind}, {"hle_NameParamGet", (const void*)&hle_NameParamGet}, {"hle_FindEntryByKey", (const void*)&hle_FindEntryByKey},
 };

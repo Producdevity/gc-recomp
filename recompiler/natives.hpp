@@ -28,6 +28,8 @@ struct Native {
     std::vector<std::pair<const char*, std::int32_t>> callees = {};
     // Matched only as a callee and placed in the test image; never replaced.
     bool support = false;
+    // The address is in Super Mario Sunshine (GMSE01) instead, whose main.dol the test reads.
+    bool sunshine = false;
 };
 inline const std::vector<Native>& natives() {
     static const std::vector<Native> table = {
@@ -70,6 +72,12 @@ inline const std::vector<Native>& natives() {
         {"EntryRange", 13, 0xe59fbdc0b398ce33ull, 0x800E98E0u, {}, true},
         {"EntryRangeFrom", 5, 0x3cb617eefc8a3b09ull, 0x800E5A00u, {}, true},
         {"EntryKey", 7, 0xd36f356ba97bc390ull, 0x800E9C5Cu, {}, true},
+        // MSL's single-precision sine and cosine (trigf.c) in Super Mario Sunshine: the argument
+        // reduced by the nearest multiple of pi/2, then a polynomial picked by quadrant, with
+        // the constants read through r2 and from the game's tables.
+        {"sinf", 105, 0x43a71a02e94cc073ull, 0x8033C7E4u, {{"fabsf", -0x5C0}}, false, true},
+        {"cosf", 101, 0x8c9c2212b77d1f7cull, 0x8033C650u, {{"fabsf", -0x42C}}, false, true},
+        {"fabsf", 2, 0x82c9549d12bf368bull, 0x8033C224u, {}, true, true},
     };
     return table;
 }

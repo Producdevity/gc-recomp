@@ -55,9 +55,55 @@ double lfs(std::uint32_t ea) { return static_cast<double>(gc_u2f(gcrt::read32(ea
 float32x2_t load2(const std::uint8_t* p) { return vreinterpret_f32_u8(vrev32_u8(vld1_u8(p))); }
 void store2(std::uint8_t* p, float32x2_t v) { vst1_u8(p, vrev32_u8(vreinterpret_u8_f32(v))); }
 
+// MSL's sinf and cosf as Super Mario Sunshine compiles them (trigf.c): each single-precision
+// operation rounds to single and each fused multiply-add is a double fma rounded to single, in
+// the compiled order. Callers observe f1 and the LR save word only.
+constexpr std::uint32_t kFourOverPiM1 = 0x803E67C8u, kSinCosOnQuadrant = 0x803AB2C4u, kSinCosPoly = 0x803AB2E4u;
+double madds(double a, double c, double b) { return gc_rs(std::fma(a, c, b)); }
+double poly(unsigned i) { return lfs(kSinCosPoly + 4 * i); }
+double quadrant(unsigned n, unsigned i) { return lfs(kSinCosOnQuadrant + 8 * n + 4 * i); }
+struct Reduced { double fraction, square; unsigned n; bool small; };
+// x minus the nearest multiple of pi/2, scaled to the polynomials' range, and its quadrant.
+Reduced trig_reduce(gc_ctx* c) {
+    gc_st32(gc_mem, c->r[1] + 4, c->lr);
+    const float stored = static_cast<float>(c->f[1]);
+    const double x = stored, z = gc_rs(lfs(c->r[2] + 2696) * x), half = lfs(c->r[2] + 2700);
+    const std::uint32_t n = gc_saturate_s32((gc_f2u(stored) & 0x80000000u) ? gc_rs(z - half) : gc_rs(half + z));
+    const double twice = gc_u2d(0x4330000000000000ull | ((n << 1) ^ 0x80000000u)) - gc_u2d(gc_ld64(gc_mem, c->r[2] + 2712));
+    double f = gc_rs(x - gc_rs(twice));
+    for (unsigned k = 0; k < 4; ++k) f = madds(lfs(kFourOverPiM1 + 4 * k), x, f);
+    const bool small = std::fabs(f) < lfs(c->r[2] + 2704);
+    return {f, small ? 0.0 : gc_rs(f * f), n & 3, small};
+}
+void set_f1(gc_ctx* c, double v) { c->f[1] = c->ps1[1] = v; }
+
 } // namespace
 
 extern "C" {
+
+void hle_sinf(gc_ctx* c) {
+    const Reduced r = trig_reduce(c);
+    const double f = r.fraction, s = r.square;
+    if (r.small) return set_f1(c, madds(poly(9), gc_rs(f * quadrant(r.n, 1)), quadrant(r.n, 0)));
+    if (r.n & 1) {
+        const double t = madds(s, madds(s, madds(s, madds(poly(0), s, poly(2)), poly(4)), poly(6)), poly(8));
+        return set_f1(c, gc_rs(t * quadrant(r.n, 0)));
+    }
+    const double t = madds(s, madds(s, madds(s, madds(poly(1), s, poly(3)), poly(5)), poly(7)), poly(9));
+    set_f1(c, gc_rs(gc_rs(f * t) * quadrant(r.n, 1)));
+}
+
+void hle_cosf(gc_ctx* c) {
+    const Reduced r = trig_reduce(c);
+    const double f = r.fraction, s = r.square;
+    if (r.small) return set_f1(c, gc_rs(-std::fma(f, quadrant(r.n, 0), -quadrant(r.n, 1))));
+    if (r.n & 1) {
+        const double t = gc_rs(-std::fma(s, madds(s, madds(s, madds(poly(1), s, poly(3)), poly(5)), poly(7)), poly(9)));
+        return set_f1(c, gc_rs(gc_rs(f * t) * quadrant(r.n, 0)));
+    }
+    const double t = madds(s, madds(s, madds(s, madds(poly(0), s, poly(2)), poly(4)), poly(6)), poly(8));
+    set_f1(c, gc_rs(t * quadrant(r.n, 1)));
+}
 
 // PSMTXConcat(a = r3, b = r4, ab = r5): ab = a * b for 3x4 matrices. The guest code loads
 // every element before its first store, so aliased arguments behave the same. f1 and f2 are

@@ -1,8 +1,9 @@
 // Writes the guest code of the replaced functions (recompiler/natives.hpp) as a DOL, so the
 // test can translate it with --no-natives and compare it with the runtime's versions. The code
-// is copied from Luigi's Mansion's main.dol, from each native's address there, and must match
-// the native's length and hash.
-// Usage: gc-natives-gen GLME01-MAIN.dol OUT.dol OUT.symbols
+// is copied from Luigi's Mansion's main.dol, or Super Mario Sunshine's for its natives, from each
+// native's address there, and must match the native's length and hash. Without the Sunshine DOL
+// its natives are left out.
+// Usage: gc-natives-gen GLME01-MAIN.dol OUT.dol OUT.symbols [GMSE01-MAIN.dol]
 #include "../recompiler/natives.hpp"
 
 #include <algorithm>
@@ -20,17 +21,22 @@ void put32(std::vector<std::uint8_t>& v, std::size_t at, std::uint32_t x) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 4) return 2;
-    gcr::Image game;
+    if (argc != 4 && argc != 5) return 2;
+    gcr::Image game, sunshine;
     std::string error;
-    if (!game.load_dol(argv[1], error)) {
+    if (!game.load_dol(argv[1], error) || (argc == 5 && !sunshine.load_dol(argv[4], error))) {
         std::fprintf(stderr, "%s\n", error.c_str());
         return 1;
     }
+    const auto source = [&](const gcr::Native& n) -> const gcr::Image* {
+        if (!n.address) return nullptr;
+        if (n.sunshine) return argc == 5 ? &sunshine : nullptr;
+        return &game;
+    };
     // One text section spans the natives, each at its address in the game.
     std::uint32_t lo = 0xFFFFFFFFu, hi = 0;
     for (const auto& n : gcr::natives())
-        if (n.address) {
+        if (source(n)) {
             lo = std::min(lo, n.address);
             hi = std::max(hi, n.address + n.length * 4);
         }
@@ -38,12 +44,13 @@ int main(int argc, char** argv) {
     std::FILE* symbols = std::fopen(argv[3], "w");
     if (!symbols) return 1;
     for (const auto& n : gcr::natives()) {
-        if (!n.address) continue;
-        if (!gcr::native_at(game, n.address, n)) {
-            std::fprintf(stderr, "%s is not at 0x%08X in %s\n", n.name, n.address, argv[1]);
+        const gcr::Image* image = source(n);
+        if (!image) continue;
+        if (!gcr::native_at(*image, n.address, n)) {
+            std::fprintf(stderr, "%s is not at 0x%08X in its game's main.dol\n", n.name, n.address);
             return 1;
         }
-        for (std::uint32_t k = 0; k < n.length; ++k) placed[(n.address - lo) / 4 + k] = game.read32(n.address + 4 * k);
+        for (std::uint32_t k = 0; k < n.length; ++k) placed[(n.address - lo) / 4 + k] = image->read32(n.address + 4 * k);
         std::fprintf(symbols, "%s = .text:0x%08X; // type:function size:0x%X scope:global\n", n.name, n.address, n.length * 4);
     }
     std::fclose(symbols);

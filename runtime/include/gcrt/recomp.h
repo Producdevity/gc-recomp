@@ -66,6 +66,8 @@ void hle_PSVECNormalize(gc_ctx*);
 void hle_PSVECSquareMag(gc_ctx*);
 void hle_PSVECCrossProduct(gc_ctx*);
 void hle_PSVECMag(gc_ctx*);
+void hle_sinf(gc_ctx*);
+void hle_cosf(gc_ctx*);
 void hle_WriteMTXPS4x3(gc_ctx*);
 void hle_WriteMTXPS3x3from3x4(gc_ctx*);
 void hle_VecNormalizeSafe(gc_ctx*);

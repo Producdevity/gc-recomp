@@ -49,14 +49,15 @@ endif()
 # Runtime replacements of SDK functions against their translated guest code, which the test
 # copies from Luigi's Mansion's main.dol.
 set(GC_NATIVES_DOL "" CACHE FILEPATH "Luigi's Mansion (GLME01) main.dol for the natives test")
+set(GC_NATIVES_SMS_DOL "" CACHE FILEPATH "Super Mario Sunshine (GMSE01) main.dol for its natives in that test")
 if(GC_TESTS AND GC_NATIVES_DOL)
     set(gcbe_nat "${CMAKE_BINARY_DIR}/gcbe-natives")
     file(MAKE_DIRECTORY "${gcbe_nat}")
     add_executable(gc-natives-gen ${gcbe_root}/tests/natives_gen.cpp)
     target_link_libraries(gc-natives-gen PRIVATE gcbe_translator)
     add_custom_command(OUTPUT "${gcbe_nat}/natives.dol" "${gcbe_nat}/symbols.txt"
-        COMMAND gc-natives-gen "${GC_NATIVES_DOL}" "${gcbe_nat}/natives.dol" "${gcbe_nat}/symbols.txt"
-        DEPENDS gc-natives-gen "${GC_NATIVES_DOL}")
+        COMMAND gc-natives-gen "${GC_NATIVES_DOL}" "${gcbe_nat}/natives.dol" "${gcbe_nat}/symbols.txt" ${GC_NATIVES_SMS_DOL}
+        DEPENDS gc-natives-gen "${GC_NATIVES_DOL}" ${GC_NATIVES_SMS_DOL})
     add_custom_command(OUTPUT "${gcbe_nat}/natives.gcbe"
         COMMAND gcbe --dol "${gcbe_nat}/natives.dol" --symbols "${gcbe_nat}/symbols.txt" --no-natives
                 --out "${gcbe_nat}/natives.gcbe"
@@ -65,6 +66,9 @@ if(GC_TESTS AND GC_NATIVES_DOL)
     add_executable(gc-natives-test ${gcbe_root}/tests/natives_run.cpp)
     target_link_libraries(gc-natives-test PRIVATE gcbe_loader)
     target_compile_definitions(gc-natives-test PRIVATE GCBE_NATIVES_BLOB="${gcbe_nat}/natives.gcbe")
+    if(GC_NATIVES_SMS_DOL)
+        target_compile_definitions(gc-natives-test PRIVATE GCBE_NATIVES_SMS_DOL="${GC_NATIVES_SMS_DOL}")
+    endif()
     add_dependencies(gc-natives-test gcbe_natives_image)
     add_test(NAME natives_exact COMMAND gc-natives-test)
 endif()
