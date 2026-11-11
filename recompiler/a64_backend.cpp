@@ -10,10 +10,12 @@
 // decode, record each instruction's register uses and definitions by running the code
 // generator in analysis mode, solve liveness, assign host registers by weighted use, then
 // generate code. Slow paths (device registers, safepoints, quantized formats) go after the
-// function body, followed by its literal pool and jump tables.
+// function body, followed by its literal pool and jump tables. The host code of body and slow
+// paths is then scheduled for the Cortex-A53 (a64_sched.cpp).
 #include "a64_backend.hpp"
 
 #include "a64_asm.hpp"
+#include "a64_sched.hpp"
 #include "gcbe/blob.h"
 #include "gcrt/recomp.h"
 #include "ppc.hpp"
@@ -211,6 +213,7 @@ private:
     void layout_frame();
     void generate();
     bool finish();   // false: a TBNZ is out of range
+    void schedule_code();
 
     int new_label() { label_pos_.push_back(-1); return static_cast<int>(label_pos_.size() - 1); }
     void bind(int l) { label_pos_[l] = static_cast<int>(a_.pos()); }
@@ -3327,6 +3330,7 @@ bool Compiler::finish() {
         auto fn = cold_[c];
         fn();
     }
+    schedule_code();
     for (auto& t : tables_) {
         bind(t.label);
         std::size_t base = a_.pos();
@@ -3372,6 +3376,35 @@ bool Compiler::finish() {
         a_.code[fx.at] = w;
     }
     return true;
+}
+
+// Host instruction scheduling (a64_sched.cpp) of the body and slow paths, before the tables and
+// literals: blocks start where labels that branches, tables or entries use are bound. Patch sites
+// move with their instructions.
+void Compiler::schedule_code() {
+    const std::size_t end = a_.pos();
+    std::vector<bool> leader(end + 1, false);
+    leader[0] = true;
+    leader[std::min<std::size_t>(out_.entry, end)] = true;
+    auto mark = [&](int label) {
+        const int p = label_pos_[static_cast<std::size_t>(label)];
+        if (p >= 0 && static_cast<std::size_t>(p) <= end) leader[static_cast<std::size_t>(p)] = true;
+    };
+    std::vector<int> target(end, -1);
+    for (const auto& fx : fixes_) {
+        mark(fx.label);
+        const int p = label_pos_[static_cast<std::size_t>(fx.label)];
+        if (fx.at < end && p >= 0 && (fx.kind == F_IMM26 || fx.kind == F_IMM19 || fx.kind == F_IMM14)) target[fx.at] = p;
+    }
+    for (const auto& t : tables_) {
+        mark(t.fallback);
+        for (int e : t.entries) mark(e);
+    }
+    const std::vector<std::uint32_t> moved = a64::schedule_a53(a_.code, end, leader, target);
+    for (auto& fx : fixes_)
+        if (fx.at < end) fx.at = moved[fx.at];
+    for (auto& c : out_.calls) c.first = moved[c.first];
+    for (auto& c : out_.external_calls) c.first = moved[c.first];
 }
 
 // Load scheduling for the in-order A53 (3-cycle load-to-use): within a basic block, each

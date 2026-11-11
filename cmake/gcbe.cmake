@@ -8,6 +8,7 @@ set(gcbe_root "${CMAKE_CURRENT_LIST_DIR}/..")
 
 add_library(gcbe_translator STATIC
     ${gcbe_root}/recompiler/a64_backend.cpp
+    ${gcbe_root}/recompiler/a64_sched.cpp
     ${gcbe_root}/recompiler/a64_translate.cpp
     ${gcbe_root}/recompiler/program.cpp
     ${gcbe_root}/recompiler/image.cpp

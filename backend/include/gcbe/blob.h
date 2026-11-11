@@ -8,7 +8,7 @@
 #define GCBE_MAGIC 0x45424347u /* "GCBE" */
 #define GCBE_VERSION 1u
 /* Bumped whenever generated code changes; images from another translator are retranslated. */
-#define GCBE_TRANSLATOR 26u
+#define GCBE_TRANSLATOR 27u
 
 enum { GCBE_FLAG_VIRTUAL_TIME = 1u };
 
