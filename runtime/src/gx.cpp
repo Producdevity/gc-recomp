@@ -12,6 +12,7 @@
 #include "gcrt/io.hpp"
 #include "gcrt/runtime.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdlib>
@@ -31,6 +32,24 @@ GxSyncStats sync_stats;
 // snapshot. Set on the guest thread, read on the GX thread.
 std::atomic<std::uint64_t> peek_tokens[1024];
 bool reads_efb(std::uint16_t token) { return peek_tokens[token >> 6].load(std::memory_order_relaxed) >> (token & 63) & 1; }
+// Per token value, the EFB pixels its handler read in its latest interrupt: bit 56 valid,
+// then y1, x1, y0, x0 (10 bits each, inclusive) above the token's 16 bits. Its snapshots
+// read back only that rectangle widened by kRegionMargin; reads outside it wait for the GX
+// thread and stay exact. GCRT_SNAPSHOT_FULL=1 reads back the whole EFB.
+constexpr int kRegionMargin = 32;
+std::atomic<std::uint64_t> peek_bounds[4096];
+void learn_bounds(std::uint16_t token, int x0, int y0, int x1, int y1) {
+    peek_bounds[token & 4095].store(1ull << 56 | std::uint64_t(y1) << 46 | std::uint64_t(x1) << 36 | std::uint64_t(y0) << 26 |
+                                        std::uint64_t(x0) << 16 | token,
+                                    std::memory_order_relaxed);
+}
+int token_snapshot(std::uint16_t token) {
+    static const bool full = std::getenv("GCRT_SNAPSHOT_FULL") != nullptr;
+    const std::uint64_t b = peek_bounds[token & 4095].load(std::memory_order_relaxed);
+    if (full || !(b >> 56) || (b & 0xFFFF) != token) return backend->snapshot();
+    const int x0 = int(b >> 16 & 0x3FF), y0 = int(b >> 26 & 0x3FF), x1 = int(b >> 36 & 0x3FF), y1 = int(b >> 46 & 0x3FF);
+    return backend->snapshot(x0 - kRegionMargin, y0 - kRegionMargin, x1 - x0 + 1 + 2 * kRegionMargin, y1 - y0 + 1 + 2 * kRegionMargin);
+}
 std::vector<std::uint8_t> pending;
 constexpr std::size_t kFeedThreshold = 32 * 1024;
 // The GP read pointer: the FIFO address after the last byte the backend consumed. Queued
@@ -150,6 +169,14 @@ struct PixelEngine final : Device {
     std::uint16_t token = 0;
     // The EFB snapshot of the delivered token, until its interrupt is acknowledged.
     int snapshot = -1;
+    // The pixels its handler has read so far (x0 > x1: none yet).
+    int read_x0 = 1, read_y0 = 1, read_x1 = 0, read_y1 = 0;
+    void note_read(int x, int y) {
+        if (read_x0 > read_x1) { read_x0 = read_x1 = x; read_y0 = read_y1 = y; }
+        read_x0 = std::min(read_x0, x); read_x1 = std::max(read_x1, x);
+        read_y0 = std::min(read_y0, y); read_y1 = std::max(read_y1, y);
+        learn_bounds(token, read_x0, read_y0, read_x1, read_y1);
+    }
     void drop_snapshot() {
         const int s = snapshot;
         snapshot = -1;
@@ -276,6 +303,7 @@ struct Efb final : EfbAccess {
         const int x = (a >> 2) & 0x3FF, y = (a >> 12) & 0x3FF;
         std::uint32_t value = 0;
         if (pe.in_token_handler()) {
+            pe.note_read(x, y);
             if (const int s = pe.snapshot; s >= 0) {
                 ++sync_stats.snapshot_peeks;
                 if (backend->peek_snapshot(s, depth, x, y, value)) return value;
@@ -468,12 +496,13 @@ void gx_token(std::uint16_t token, bool interrupt) {
     static const bool live = std::getenv("GCRT_SYNC_LIVE") != nullptr;
     int snapshot = -1;
     if (interrupt && !live && worker && worker->on_worker() && !virtual_time && reads_efb(token))
-        snapshot = backend->snapshot();
+        snapshot = token_snapshot(token);
     on_guest([token, interrupt, snapshot] {
         deliver(snapshot, [token, interrupt, snapshot] {
             if (pe.snapshot >= 0) pe.drop_snapshot();
             pe.token = token;
             pe.snapshot = snapshot;
+            pe.read_x0 = 1; pe.read_x1 = 0;
             if (snapshot >= 0) ++sync_stats.snapshot_tokens;
             if (interrupt) {
                 pe.regs[5] |= 0x4;

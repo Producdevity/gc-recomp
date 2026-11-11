@@ -23,6 +23,7 @@ public:
     virtual std::uint32_t peek(bool depth, int x, int y) { (void)depth; (void)x; (void)y; return 0; }
     // EFB snapshots, as GxBackend describes them.
     virtual int snapshot_efb() { return -1; }
+    virtual int snapshot_efb(int x, int y, int width, int height) { (void)x; (void)y; (void)width; (void)height; return snapshot_efb(); }
     virtual void release_snapshot(int) {}
     virtual bool snapshot_ready(int) const { return false; }
     virtual bool peek_snapshot(int, bool, int, int, std::uint32_t&) const { return false; }

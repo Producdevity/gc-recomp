@@ -212,6 +212,9 @@ struct Backend final : GxBackend {
         return sink.renderer ? sink.renderer->peek(depth, x, y) : 0;
     }
     int snapshot() override { return sink.renderer && !sink.skip_draws ? sink.renderer->snapshot_efb() : -1; }
+    int snapshot(int x, int y, int width, int height) override {
+        return sink.renderer && !sink.skip_draws ? sink.renderer->snapshot_efb(x, y, width, height) : -1;
+    }
     void release_snapshot(int index) override { sink.renderer->release_snapshot(index); }
     bool snapshot_ready(int index) const override { return sink.renderer->snapshot_ready(index); }
     bool peek_snapshot(int index, bool depth, int x, int y, std::uint32_t& value) const override {

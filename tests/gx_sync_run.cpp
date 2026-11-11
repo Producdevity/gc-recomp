@@ -1,6 +1,6 @@
 // Draw-sync tokens (runtime/src/gx.cpp): once a token handler reads the EFB, interrupt
 // tokens wait for an EFB snapshot, later PE events wait behind them, and the handler's
-// reads come from the snapshot.
+// reads come from the snapshot, read back around the pixels the handler read before.
 #include "gcrt/gx.hpp"
 #include "gcrt/io.hpp"
 #include "gcrt/runtime.hpp"
@@ -39,6 +39,13 @@ struct FakeBackend final : gcrt::GxBackend {
     int snapshot() override {
         ++taken;
         return next;
+    }
+    int region[4] = {};
+    unsigned regions = 0;
+    int snapshot(int x, int y, int width, int height) override {
+        region[0] = x; region[1] = y; region[2] = width; region[3] = height;
+        ++regions;
+        return snapshot();
     }
     void release_snapshot(int index) override { released.push_back(index); }
     bool snapshot_ready(int) const override { return ready; }
@@ -107,6 +114,9 @@ int main() {
         while (fake.hold) std::this_thread::yield();
     });
     check(fake.taken == 1, "interrupt token takes a snapshot");
+    check(fake.regions == 1 && fake.region[0] == 3 - 32 && fake.region[1] == 4 - 32 && fake.region[2] == 65 &&
+              fake.region[3] == 65,
+          "the snapshot reads back the pixels the token's handler read last time, with a margin");
     check(!run_until([] { return status() & 0xC; }, 5), "token and draw done wait for the snapshot");
     check(gcrt::read16(kPeToken) == 9, "token register keeps the delivered token");
     fake.ready = true;

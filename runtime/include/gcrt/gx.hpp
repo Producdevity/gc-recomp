@@ -22,6 +22,9 @@ public:
     // EFB snapshots as of a draw-sync token (see gx_token). snapshot and release_snapshot
     // run on the backend's thread; snapshot returns -1 when none is available.
     virtual int snapshot() { return -1; }
+    // As snapshot, but only the EFB pixels in the rectangle are read back ahead of the
+    // handler's reads; reads elsewhere wait for the backend and stay exact.
+    virtual int snapshot(int x, int y, int width, int height) { (void)x; (void)y; (void)width; (void)height; return snapshot(); }
     virtual void release_snapshot(int) {}
     // Any thread: the snapshot has been read back, and its value at (x, y).
     virtual bool snapshot_ready(int) const { return false; }

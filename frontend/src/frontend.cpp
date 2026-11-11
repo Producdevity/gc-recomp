@@ -121,6 +121,9 @@ public:
     }
     std::uint32_t peek(bool depth, int x, int y) override { return depth ? r_.peek_depth(x, y) : r_.peek_color(x, y); }
     int snapshot_efb() override { return r_.snapshot_efb(); }
+    int snapshot_efb(int x, int y, int width, int height) override {
+        return r_.snapshot_efb(starlet::gx::EfbRegion{x, y, width, height});
+    }
     void release_snapshot(int index) override { r_.release_snapshot(index); }
     bool snapshot_ready(int index) const override { return r_.snapshot_ready(index); }
     bool peek_snapshot(int index, bool depth, int x, int y, std::uint32_t& value) const override {
@@ -160,6 +163,7 @@ public:
     std::uint32_t peek(bool depth, int x, int y) override { return inner_->peek(depth, x, y); }
     void poke(bool depth, int x, int y, std::uint32_t v) override { inner_->poke(depth, x, y, v); }
     int snapshot() override { return inner_->snapshot(); }
+    int snapshot(int x, int y, int width, int height) override { return inner_->snapshot(x, y, width, height); }
     void release_snapshot(int index) override { inner_->release_snapshot(index); }
     bool snapshot_ready(int index) const override { return inner_->snapshot_ready(index); }
     bool peek_snapshot(int index, bool depth, int x, int y, std::uint32_t& value) const override {
@@ -747,8 +751,13 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
                 (r.direct.geometry_misses - stats.gles.direct.geometry_misses) / f,
                 (r.direct.geometry_validated_bytes - stats.gles.direct.geometry_validated_bytes) / 1024.0 / f,
                 (ram_tracking_faults() - stats.faults) / f);
+            if (const auto misses = r.region_misses - stats.gles.region_misses)
+                log("snapshots: %.2f reads per frame outside the read-back region\n", misses / f);
             if (const auto unready = r.direct.unready_draws - stats.gles.direct.unready_draws)
                 log("unready: %llu draws skipped while their program built\n", static_cast<unsigned long long>(unready));
+            if (const auto links = r.direct.fallback_links - stats.gles.direct.fallback_links)
+                log("programs: %llu linked on the GL thread after their draws waited (longest link %llu ms)\n",
+                    static_cast<unsigned long long>(links), static_cast<unsigned long long>(r.direct.fallback_link_max_ms));
             static GxSyncStats last_sync;
             const GxSyncStats sync = gx_sync_stats();
             if (sync.snapshot_tokens != last_sync.snapshot_tokens)
