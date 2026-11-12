@@ -15,12 +15,9 @@ request and ask; that is a good way to start.
   together and unrelated ones apart.
 - Fix a reported problem or a clear gap. For larger features, open an issue first to agree on
   the approach before building it.
-- Follow the surrounding code. Add a comment only where the code can't explain itself, such
-  as a hardware quirk or an external constraint.
-- Write commit titles as `type(scope): summary`, for example `fix(runtime): ...`, in at most
-  72 characters.
-- Describe the change briefly in your own words, with what you tested: commands, device,
-  firmware and GPU driver, and before/after numbers for performance changes.
+- Follow the surrounding code.
+- Say in your own words what the change does and how you tested it. For performance changes,
+  include before/after numbers and the device.
 
 ## Testing
 
