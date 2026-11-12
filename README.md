@@ -125,3 +125,9 @@ decompilation projects (doldecomp/sms, Moddimation/Yasiki), which also document 
 DSP task and JAudio mail protocols. The test RVZ writer follows the format described in
 Dolphin's `docs/WiaAndRvz.md`. No code from Dolphin, DolRecomp, XenonRecomp, N64Recomp,
 WiiCompiled, Aurora or other ports is used.
+
+## License
+
+gc-recomp is licensed under the GNU General Public License v3.0; see [LICENSE](LICENSE).
+It links Starlet (GPL-3.0) and, through Starlet, the Zstandard decoder (BSD). Code that
+gc-recomp translates from a game disc remains the game's and is not covered by this license.
