@@ -28,9 +28,10 @@ void si_init(PadSource);
 bool di_init(const std::string& image_path, std::string& error);
 bool disc_read(std::uint64_t offset, void* destination, std::size_t size);
 
-// Memory cards in slots A and B (empty path: no card) and the IPL/RTC/SRAM chip.
-// Card image paths for slots A and B; empty leaves the slot empty.
-void exi_init(const std::string& card_a, const std::string& card_b);
+// Memory card A in Dolphin's GCI folder for the game's region under saves (empty: no card),
+// slot B empty, and the IPL/RTC/SRAM chip. A memcard-a.raw image in saves, the earlier
+// format, is imported into the folder once and kept as memcard-a.raw.imported.
+void exi_init(const std::string& saves, char game_region);
 // Writes card images with unsaved changes now (they are otherwise written shortly after
 // the last change).
 void memory_cards_flush();

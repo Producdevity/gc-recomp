@@ -6,11 +6,19 @@
 #include "gcrt/runtime.hpp"
 #include "gcrt/sampler.hpp"
 
+#include <starlet/card/card.hpp>
+
+#include <array>
+#include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace gcrt {
@@ -95,19 +103,27 @@ struct IplChip final : ExiDevice {
     }
 };
 
-// A flash memory card kept in a raw image file (the card's bytes in order). Commands as the
-// SDK's CARD library sends them: 0x00 ID, 0x83 status, 0x89 clear status, 0x81 interrupt
-// enable, 0x52 read, 0xF2 page program, 0xF1 sector erase, 0xF4 card erase. The card
-// reports itself unlocked, so the SDK skips its unlock handshake; program and erase
-// completions raise the channel's EXI interrupt, which the SDK waits for.
+// A flash memory card holding the image of a Starlet card folder (Dolphin GCI files). Commands
+// as the SDK's CARD library sends them: 0x00 ID, 0x83 status, 0x89 clear status, 0x81
+// interrupt enable, 0x52 read, 0xF2 page program, 0xF1 sector erase, 0xF4 card erase. The
+// card reports itself unlocked, so the SDK skips its unlock handshake; program and erase
+// completions raise the channel's EXI interrupt, which the SDK waits for. Writes reach the
+// folder 300 ms after the last change and at exit. A writer thread stores a copy of the image:
+// syncing the folder on an SD card can take seconds, and the CARD library fails a request
+// that waits that long (the game then reports a damaged card).
 struct MemoryCard final : ExiDevice {
-    std::string path;
+    std::unique_ptr<starlet::card::Folder> folder;
     std::vector<std::uint8_t> image;
+    std::mutex flushing;                   // guards queued_image, queued and storing
+    std::condition_variable wake, idle;
+    std::vector<std::uint8_t> queued_image;
+    bool queued = false, storing = false, writer_started = false;
     std::uint32_t id = 0;
     std::uint8_t command[5] = {};
     unsigned header = 0, position = 0, programmed = 0;
     std::uint32_t address = 0;
-    bool interrupts = false, flush_pending = false;
+    bool interrupts = false;
+    std::atomic<bool> flush_pending{false};
     std::function<void()> raise_interrupt;
 
     static unsigned command_length(std::uint8_t c) {
@@ -118,33 +134,75 @@ struct MemoryCard final : ExiDevice {
         default: return 1;
         }
     }
-    bool load(const std::string& file) {
-        path = file;
-        image.clear();
-        if (FILE* f = std::fopen(path.c_str(), "rb")) {
-            std::fseek(f, 0, SEEK_END);
-            long size = std::ftell(f);
-            std::fseek(f, 0, SEEK_SET);
-            // 4 to 64 Mbit cards; the ID's size field counts megabits.
-            if (size >= 512 * 1024 && size <= 8 * 1024 * 1024 && !(size & (size - 1))) {
-                image.resize(static_cast<std::size_t>(size));
-                if (std::fread(image.data(), 1, image.size(), f) != image.size()) image.clear();
+    bool load(const std::string& saves, starlet::card::Region region, unsigned slot, const starlet::card::Console& console) {
+        namespace sc = starlet::card;
+        folder = std::make_unique<sc::Folder>(sc::folder_for(saves, region, int(slot)), int(slot), console, 16,
+                                              [](const std::string& line) { log("memory card: %s\n", line.c_str()); });
+        if (!folder->ok()) return false;
+        const std::string raw = saves + "/memcard-a.raw";
+        if (slot == 0) {
+            if (FILE* f = std::fopen(raw.c_str(), "rb")) {
+                std::vector<std::uint8_t> old;
+                std::fseek(f, 0, SEEK_END);
+                const long size = std::ftell(f);
+                std::fseek(f, 0, SEEK_SET);
+                if (size > 0) {
+                    old.resize(static_cast<std::size_t>(size));
+                    if (std::fread(old.data(), 1, old.size(), f) != old.size()) old.clear();
+                }
+                std::fclose(f);
+                const auto result = folder->import_image(old.data(), old.size());
+                if (result == sc::ready && std::rename(raw.c_str(), (raw + ".imported").c_str()) == 0)
+                    log("memory card: imported %s into %s\n", raw.c_str(), folder->path().c_str());
+                else
+                    log("memory card: %s not imported (result %d)\n", raw.c_str(), int(result));
             }
-            std::fclose(f);
-            if (image.empty()) log("memory card: ignoring unreadable image %s\n", path.c_str());
         }
-        if (image.empty()) image.assign(512 * 1024, 0xFF);   // unformatted 59-block card
+        image = folder->image();
+        // The ID's size field counts megabits.
         id = static_cast<std::uint32_t>(image.size() * 8 / (1024 * 1024));
         return true;
     }
-    bool formatted() const { return image[0x20] != 0xFF || image[0x21] != 0xFF; }
+    // An image the game is still changing does not verify, leaves the folder unchanged and is
+    // stored after the next change.
+    void store(const std::vector<std::uint8_t>& snapshot, bool final) {
+        const std::uint64_t start = now_ns();
+        const auto result = folder->store_image(snapshot.data(), snapshot.size());
+        if (result != starlet::card::ready && (final || verbosity > 0))
+            log("memory card: image not stored (result %d)\n", int(result));
+        else if (verbosity > 0)
+            log("memory card: stored in %.1f ms\n", (now_ns() - start) / 1e6);
+    }
+    // Guest thread: hands the current image to the writer.
     void flush() {
         flush_pending = false;
-        std::string temporary = path + ".tmp";
-        FILE* f = std::fopen(temporary.c_str(), "wb");
-        bool ok = f && std::fwrite(image.data(), 1, image.size(), f) == image.size();
-        if (f) ok = std::fclose(f) == 0 && ok;
-        if (!ok || std::rename(temporary.c_str(), path.c_str()) != 0) log("memory card: cannot write %s\n", path.c_str());
+        std::lock_guard<std::mutex> lock(flushing);
+        queued_image = image;
+        queued = true;
+        if (!writer_started) {
+            writer_started = true;
+            std::thread([this] {
+                std::unique_lock<std::mutex> held(flushing);
+                for (;;) {
+                    wake.wait(held, [this] { return queued; });
+                    std::vector<std::uint8_t> snapshot = std::move(queued_image);
+                    queued = false;
+                    storing = true;
+                    held.unlock();
+                    store(snapshot, false);
+                    held.lock();
+                    storing = false;
+                    idle.notify_all();
+                }
+            }).detach();
+        }
+        wake.notify_one();
+    }
+    // Exiting thread: waits for the writer, then stores a change it has not been handed.
+    void finish() {
+        std::unique_lock<std::mutex> lock(flushing);
+        idle.wait(lock, [this] { return !queued && !storing; });
+        if (flush_pending.exchange(false)) store(image, true);
     }
     void changed(std::uint64_t busy_ns) {
         if (!flush_pending) {
@@ -311,37 +369,24 @@ struct ExternalInterface final : Device {
 
 ExternalInterface exi;
 
-// The SDK mounts an unlocked card only if SRAM holds a flash ID whose checksum byte is
-// the complement of its sum, and accepts a formatted card only if the serial in its
-// header was derived from that flash ID (CARDFormat, VerifyID). Each slot's flash ID is
-// recovered from its card's header, so images formatted elsewhere mount.
-void set_flash_id(unsigned slot, const MemoryCard* card) {
-    std::uint8_t* flash = exi.ipl.sram + 0x14 + 12 * slot;
-    std::memset(flash, 0, 12);
-    if (card && card->formatted()) {
-        std::int64_t rand = 0;
-        for (int i = 0; i < 8; ++i) rand = static_cast<std::int64_t>(static_cast<std::uint64_t>(rand) << 8 | card->image[12 + i]);
-        auto next = [](std::int64_t r) {
-            return static_cast<std::int64_t>(static_cast<std::uint64_t>(r) * 1103515245u + 12345u) >> 16;
-        };
-        for (int i = 0; i < 12; ++i) {
-            rand = next(rand);
-            flash[i] = static_cast<std::uint8_t>(card->image[i] - static_cast<std::uint8_t>(rand));
-            rand = next(rand) & 0x7FFF;
-        }
-    }
-    std::uint8_t sum = 0;
-    for (int i = 0; i < 12; ++i) sum = static_cast<std::uint8_t>(sum + flash[i]);
-    exi.ipl.sram[0x3A + slot] = static_cast<std::uint8_t>(~sum);
+// The SDK mounts an unlocked card only if SRAM holds a flash ID whose check byte is the
+// complement of its sum, and accepts a formatted card only if its serial was derived from
+// that flash ID (CARDFormat, VerifyID): the card folder derives the serial from the console's.
+void set_flash_id(unsigned slot, const std::array<std::uint8_t, 12>& id) {
+    std::memcpy(exi.ipl.sram + 0x14 + 12 * slot, id.data(), 12);
+    exi.ipl.sram[0x3A + slot] = starlet::card::flash_id_check(id);
 }
 
 } // namespace
 
-void exi_init(const std::string& card_a, const std::string& card_b) {
-    const std::string* paths[2] = {&card_a, &card_b};
+void exi_init(const std::string& saves, char game_region) {
+    namespace sc = starlet::card;
+    sc::Console console;
+    const sc::Region region = sc::region_of(game_region);
+    console.encoding = region == sc::Region::japan ? sc::Encoding::shift_jis : sc::Encoding::ansi;
     for (unsigned slot = 0; slot < 2; ++slot) {
         ExiDevice* device = &exi.absent;
-        if (!paths[slot]->empty() && exi.cards[slot].load(*paths[slot])) {
+        if (slot == 0 && !saves.empty() && exi.cards[slot].load(saves, region, slot, console)) {
             device = &exi.cards[slot];
             exi.cards[slot].raise_interrupt = [slot] {
                 exi.ch[slot].csr |= 0x2;
@@ -349,7 +394,7 @@ void exi_init(const std::string& card_a, const std::string& card_b) {
             };
         }
         exi.ch[slot].devices[0] = device;
-        set_flash_id(slot, device == &exi.absent ? nullptr : &exi.cards[slot]);
+        set_flash_id(slot, console.flash_id[slot]);
     }
     exi.ch[0].devices[1] = &exi.ipl;
     register_device(0x6800, 0x40, &exi);
@@ -357,7 +402,7 @@ void exi_init(const std::string& card_a, const std::string& card_b) {
 
 void memory_cards_flush() {
     for (auto& card : exi.cards)
-        if (card.flush_pending) card.flush();
+        if (card.folder) card.finish();
 }
 
 } // namespace gcrt

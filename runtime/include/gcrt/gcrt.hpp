@@ -12,7 +12,8 @@ namespace gcrt {
 struct BootOptions {
     std::string disc;
     Program program;   // the game's code, made from the disc's DOL
-    std::string card_a, card_b;
+    // Memory card A as a Dolphin GCI folder under saves (<saves>/USA/Card A); empty: no card.
+    std::string saves;
     GxBackend* gx = nullptr;
     bool gx_thread = false;   // run the GX backend on its own thread
     RetraceHook retrace;

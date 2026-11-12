@@ -78,7 +78,7 @@ int main(int argc, char** argv) {
 #else
     options.program = gcrt::linked_program();
 #endif
-    if (const char* card = std::getenv("GCRT_CARD_A")) options.card_a = card;
+    if (const char* saves = std::getenv("GCRT_SAVES")) options.saves = saves;
     options.gx = gcrt::starlet_backend(nullptr, gx);
     if (const char* path = std::getenv("GCRT_WAV")) {
         wav = std::fopen(path, "wb");

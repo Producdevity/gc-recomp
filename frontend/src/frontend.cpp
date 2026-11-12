@@ -645,7 +645,7 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
     BootOptions options;
     options.disc = disc;
     options.program = program;
-    options.card_a = saves + "/memcard-a.raw";
+    options.saves = saves;
     options.gx = &backend;
     options.gx_thread = gx_thread;
     options.audio = [](const std::int16_t* s, std::size_t frames, unsigned rate) { audio.push(s, frames, rate); };

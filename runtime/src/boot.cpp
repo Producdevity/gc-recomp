@@ -114,7 +114,7 @@ bool boot(const BootOptions& options, std::string& error) {
 
     vi_init(options.retrace);
     si_init(options.pads);
-    exi_init(options.card_a, options.card_b);
+    exi_init(options.saves, static_cast<char>(disc[3]));
     dsp_init(options.audio);
     gx_init(options.gx, options.gx_thread);
     events_start();
