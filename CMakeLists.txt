@@ -25,7 +25,7 @@ if(GC_FRONTEND)
     find_library(SDL2_LIBRARY NAMES SDL2 SDL2-2.0 REQUIRED)
     add_library(gcrt_frontend STATIC frontend/src/frontend.cpp)
     target_include_directories(gcrt_frontend PUBLIC frontend/include PRIVATE "${SDL2_INCLUDE_DIR}")
-    target_link_libraries(gcrt_frontend PUBLIC gcrt starlet_gx_gles "${SDL2_LIBRARY}")
+    target_link_libraries(gcrt_frontend PUBLIC gcrt starlet_gx_gles starlet::host "${SDL2_LIBRARY}")
 endif()
 
 option(GC_TESTS "Build gc-recomp tests" ${PROJECT_IS_TOP_LEVEL})

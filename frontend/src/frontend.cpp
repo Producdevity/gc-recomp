@@ -11,6 +11,10 @@
 #include <GLES3/gl31.h>
 #include <starlet/disc/image.hpp>
 #include <starlet/gx/gles/renderer.hpp>
+#include <starlet/host/audio_output.hpp>
+#include <starlet/host/controllers.hpp>
+#include <starlet/host/pad.hpp>
+#include <starlet/host/quit.hpp>
 #ifdef GCRT_WITH_GCBE
 #include "../../tools/nav.hpp"
 #include "a64_translate.hpp"
@@ -68,6 +72,29 @@ std::uint64_t process_cpu_ns() {
 // Time the guest thread spends decoding and drawing the GX stream.
 // CPU time spent in the GX backend, on whichever thread runs it.
 std::atomic<std::uint64_t> gx_cpu_ns{0};
+
+// The frontend ends a port with SIGTERM, and gptokeyb's exit chord follows it with SIGKILL after
+// 3 s. The guest thread exits at its next retrace, or Starlet's quit thread does when the
+// guest has not within 500 ms; either saves the memory cards first.
+void handle_quit() {
+    namespace host = starlet::host;
+    host::install_quit_signals();
+    host::on_quit([] {
+        const int signal = host::quit_signal();
+        const std::uint64_t start = now_ns();
+        memory_cards_flush();
+        log("quit: %s; memory cards saved in %.1f ms\n",
+            signal == SIGTERM ? "SIGTERM" : signal == SIGINT ? "SIGINT" : host::quit_requested() ? "quit requested" : "exit",
+            (now_ns() - start) / 1e6);
+    });
+    host::exit_after_quit(std::chrono::milliseconds(500));
+}
+
+// SDL's events on the thread that owns them; exits once a quit is requested.
+void poll_quit() {
+    starlet::host::poll_events();
+    if (starlet::host::quit_requested()) starlet::host::exit_now(0);
+}
 
 void write_ppm(const std::string& path, const std::vector<std::uint8_t>& rgba, int width, int height);
 
@@ -140,6 +167,7 @@ public:
             throw;
         }
     }
+    void wait_snapshot(int index) override { r_.wait_snapshot(index); }
 
 private:
     sg::GlesRenderer& r_;
@@ -167,12 +195,12 @@ public:
     void release_snapshot(int index) override { inner_->release_snapshot(index); }
     bool snapshot_ready(int index) const override { return inner_->snapshot_ready(index); }
     bool peek_snapshot(int index, bool depth, int x, int y, std::uint32_t& value) const override {
-    void wait_snapshot(int index) override { r_.wait_snapshot(index); }
         return inner_->peek_snapshot(index, depth, x, y, value);
     }
     std::uint32_t peek_snapshot_wait(int index, bool depth, int x, int y) override {
         return inner_->peek_snapshot_wait(index, depth, x, y);
     }
+    void wait_snapshot(int index) override { inner_->wait_snapshot(index); }
 
 private:
     GxBackend* inner_;
@@ -196,50 +224,57 @@ struct Display {
     }
 };
 
+// Starlet's push output: a write that does not fit its 120 ms ring is dropped, which keeps
+// latency bounded when the game runs ahead.
 struct Audio {
-    SDL_AudioDeviceID device = 0;
-    unsigned rate = 0;
-    bool failed = false;
-    void wait_snapshot(int index) override { inner_->wait_snapshot(index); }
-    void open(unsigned r) {
-        if ((device && rate == r) || failed) return;
-        if (device) SDL_CloseAudioDevice(device);
-        SDL_AudioSpec want{}, have{};
-        want.freq = static_cast<int>(r);
-        want.format = AUDIO_S16SYS;
-        want.channels = 2;
-        want.samples = 512;
-        device = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
-        rate = r;
-        if (device) SDL_PauseAudioDevice(device, 0);
-        else {
-            failed = true;
-            log("Audio: %s\n", SDL_GetError());
+    starlet::host::AudioOutput output;
+    bool reported = false;
+    void push(const std::int16_t* samples, std::size_t frames, unsigned rate) {
+        if (!output.is_open() || output.sample_rate() != rate) {
+            output.close();
+            output.open_push(rate);
+            if (const std::string error = output.device_error(); !error.empty() && !reported) {
+                log("Audio: %s\n", error.c_str());
+                reported = true;
+            }
         }
-    }
-    void push(const std::int16_t* samples, std::size_t frames, unsigned r) {
-        open(r);
-        if (!device) return;
-        // Keep at most ~120 ms queued so latency stays bounded when the game runs ahead.
-        if (SDL_GetQueuedAudioSize(device) > r * 4 * 120 / 1000) return;
-        SDL_QueueAudio(device, samples, static_cast<Uint32>(frames * 4));
+        output.write(samples, frames);
     }
 };
 
 struct Pads {
-    SDL_GameController* controller = nullptr;
     InputScript script;
     // --nav PLAN: port 0 follows a route plan steered by guest RAM (tools/nav.hpp).
     gcnav::Controller nav;
     bool navigating = false;
     std::uint64_t start = now_ns();
 
-    static std::uint8_t axis(Sint16 v, bool invert) {
-        double x = v / 32768.0;
-        if (invert) x = -x;
-        if (std::fabs(x) < 0.12) x = 0;
-        return static_cast<std::uint8_t>(std::lround(128 + std::clamp(x, -1.0, 1.0) * 100));
+    // GameCube places on the handheld: A south, B west, X east, Y north; L the left shoulder or
+    // trigger, R the right trigger, Z the right shoulder; axial stick dead zone of 12%.
+    static starlet::host::GameCubeMapping mapping() {
+        using starlet::host::bit;
+        using starlet::host::Input;
+        starlet::host::GameCubeMapping m;
+        m.a = bit(Input::south);
+        m.b = bit(Input::west);
+        m.x = bit(Input::east);
+        m.y = bit(Input::north);
+        m.start = bit(Input::start);
+        m.z = bit(Input::right_shoulder);
+        m.up = bit(Input::dpad_up);
+        m.down = bit(Input::dpad_down);
+        m.left = bit(Input::dpad_left);
+        m.right = bit(Input::dpad_right);
+        m.l = bit(Input::left_shoulder) | bit(Input::left_trigger);
+        m.r = bit(Input::right_trigger);
+        m.trigger_threshold = 24000;
+        m.trigger_left = {true, true};
+        m.trigger_right = {true, false};
+        m.main_stick = {starlet::host::StickResponse::Shape::axial, 3932, false, 32768.f, false, 100};
+        m.c_stick = m.main_stick;
+        return m;
     }
+    std::unique_ptr<starlet::host::Controllers> controllers;
     // SDL's controller state changes only when events are pumped (once per field, in the
     // retrace handler), so the port 0 state is sampled there instead of on every SI poll.
     PadState sampled;
@@ -261,34 +296,18 @@ struct Pads {
     PadState sample() {
         PadState p;
         p.connected = true;
-        if (!controller) {
-            for (int i = 0; i < SDL_NumJoysticks(); ++i)
-                if (SDL_IsGameController(i) && (controller = SDL_GameControllerOpen(i))) break;
-        }
-        std::uint16_t b = 0;
-        if (controller) {
-            auto pressed = [&](SDL_GameControllerButton k) { return SDL_GameControllerGetButton(controller, k) != 0; };
-            if (pressed(SDL_CONTROLLER_BUTTON_A)) b |= PAD_A;
-            if (pressed(SDL_CONTROLLER_BUTTON_X)) b |= PAD_B;
-            if (pressed(SDL_CONTROLLER_BUTTON_B)) b |= PAD_X;
-            if (pressed(SDL_CONTROLLER_BUTTON_Y)) b |= PAD_Y;
-            if (pressed(SDL_CONTROLLER_BUTTON_START)) b |= PAD_START;
-            if (pressed(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) b |= PAD_Z;
-            if (pressed(SDL_CONTROLLER_BUTTON_DPAD_UP)) b |= PAD_UP;
-            if (pressed(SDL_CONTROLLER_BUTTON_DPAD_DOWN)) b |= PAD_DOWN;
-            if (pressed(SDL_CONTROLLER_BUTTON_DPAD_LEFT)) b |= PAD_LEFT;
-            if (pressed(SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) b |= PAD_RIGHT;
-            p.stick_x = axis(SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTX), false);
-            p.stick_y = axis(SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY), true);
-            p.cstick_x = axis(SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTX), false);
-            p.cstick_y = axis(SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTY), true);
-            Sint16 l = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
-            Sint16 r = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
-            p.trigger_l = static_cast<std::uint8_t>(std::clamp(l / 128, 0, 255));
-            p.trigger_r = static_cast<std::uint8_t>(std::clamp(r / 128, 0, 255));
-            if (pressed(SDL_CONTROLLER_BUTTON_LEFTSHOULDER) || l > 24000) { b |= PAD_L; p.trigger_l = 255; }
-            if (r > 24000) b |= PAD_R;
-        }
+        // After SDL_Init, on the thread that pumps SDL's events.
+        if (!controllers) controllers = std::make_unique<starlet::host::Controllers>(1, [](const char* line) { log("%s\n", line); });
+        controllers->update();
+        static const starlet::host::GameCubeMapping layout = mapping();
+        const auto pad = starlet::host::to_gamecube(controllers->state(0), layout);
+        std::uint16_t b = pad.buttons;
+        p.stick_x = static_cast<std::uint8_t>(128 + pad.stick_x);
+        p.stick_y = static_cast<std::uint8_t>(128 + pad.stick_y);
+        p.cstick_x = static_cast<std::uint8_t>(128 + pad.substick_x);
+        p.cstick_y = static_cast<std::uint8_t>(128 + pad.substick_y);
+        p.trigger_l = pad.trigger_left;
+        p.trigger_r = pad.trigger_right;
         const Uint8* keys = SDL_GetKeyboardState(nullptr);
         if (keys[SDL_SCANCODE_RETURN]) b |= PAD_START;
         if (keys[SDL_SCANCODE_Z]) b |= PAD_A;
@@ -371,8 +390,7 @@ void prepare_programs(sg::GlesRenderer& renderer, SDL_Window* window) {
         const std::uint64_t start = now_ns();
         log("Preparing %zu shaders\n", s.to_build);
         for (; s.running && !s.lists_done; s = renderer.program_builder()) {
-            for (SDL_Event event; SDL_PollEvent(&event);)
-                if (event.type == SDL_QUIT) std::_Exit(0);
+            poll_quit();
             draw_progress(window, double(s.finished) / double(s.to_build));
             SDL_Delay(30);
         }
@@ -416,9 +434,7 @@ bool translated_program(SDL_Window* window, const GameInfo& game, const std::str
             finished = true;
         });
         while (!finished) {
-            SDL_Event event;
-            while (SDL_PollEvent(&event))
-                if (event.type == SDL_QUIT) std::_Exit(0);
+            poll_quit();
             draw_progress(window, double(done) / double(std::max<std::size_t>(1, total)));
             SDL_Delay(16);
         }
@@ -445,43 +461,6 @@ bool translated_program(SDL_Window* window, const GameInfo& game, const std::str
 }
 #endif
 
-// The frontend ends a port with SIGTERM, and gptokeyb's exit chord follows it with SIGKILL after
-// 3 s. Quit signals are blocked in every thread and taken by one watcher: the guest thread saves
-// the memory cards at its next retrace, or the watcher does when the guest has not within 500 ms.
-std::atomic<int> quit_signal{0};
-std::atomic<bool> quitting{false};
-
-[[noreturn]] void quit(const char* reason) {
-    if (quitting.exchange(true))
-        for (;;) pause();
-    const std::uint64_t start = now_ns();
-    log("quit: %s\n", reason);
-    memory_cards_flush();
-    log("quit: memory cards saved in %.1f ms\n", (now_ns() - start) / 1e6);
-    std::fflush(nullptr);
-    std::_Exit(0);
-}
-
-const char* quit_reason(int signal) {
-    return signal == SIGTERM ? "SIGTERM" : signal == SIGINT ? "SIGINT" : "SIGHUP";
-}
-
-void watch_quit_signals() {
-    sigset_t signals;
-    sigemptyset(&signals);
-    for (int s : {SIGTERM, SIGINT, SIGHUP}) sigaddset(&signals, s);
-    pthread_sigmask(SIG_BLOCK, &signals, nullptr);
-    std::thread([signals] {
-        int signal = 0;
-        while (sigwait(&signals, &signal) != 0) {}
-        quit_signal.store(signal);
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        static char reason[64];
-        std::snprintf(reason, sizeof reason, "%s; the guest thread did not stop within 500 ms", quit_reason(signal));
-        quit(reason);
-    }).detach();
-}
-
 } // namespace
 
 int run_frontend(const GameInfo& game, int argc, char** argv) {
@@ -491,8 +470,7 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
         return 2;
     }
     setvbuf(stdout, nullptr, _IOLBF, 0);
-    // Before any thread starts, so that every thread inherits the blocked quit signals.
-    watch_quit_signals();
+    handle_quit();
     std::string disc = argv[1], saves = argv[2], cache = argv[3], capture;
     double seconds = 0;
     unsigned capture_every = 60;
@@ -541,9 +519,7 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
                 sampler_report(40);
                 if (!capture.empty()) sampler_dump(capture + "/samples.txt");
             }
-            memory_cards_flush();
-            std::fflush(nullptr);
-            std::_Exit(status);
+            starlet::host::exit_now(status);
         });
     mkdir(saves.c_str(), 0755);
     mkdir(cache.c_str(), 0755);
@@ -671,10 +647,7 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
             else sampler_start(1000);
             sampling = true;
         }
-        if (const int signal = quit_signal.load(std::memory_order_relaxed)) quit(quit_reason(signal));
-        SDL_Event event;
-        while (SDL_PollEvent(&event))
-            if (event.type == SDL_QUIT) quit("window closed");
+        poll_quit();
         pads.update();
         gx_flush();
         if (!capture.empty() && field % capture_every == 0) {
@@ -776,9 +749,7 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
                 if (!capture.empty()) sampler_dump(capture + "/samples.txt");
             }
             log("%s: stopping after %.0f s\n", game.title, seconds);
-            memory_cards_flush();
-            std::fflush(nullptr);
-            std::_Exit(0);
+            starlet::host::exit_now(0);
         }
     };
     std::string error;
