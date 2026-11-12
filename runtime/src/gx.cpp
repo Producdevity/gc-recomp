@@ -443,13 +443,12 @@ void pump() {
         if (o.snapshot >= 0 && !backend->snapshot_ready(o.snapshot)) {
             if (now_ns() < o.deadline) {
                 // Readbacks land as later GPU work is submitted. With the GX thread idle
-                // (the guest waits for this token) none follows, so read one pixel of the
-                // snapshot there, which waits for its readback.
+                // (the guest waits for this token) none follows, so wait for the readback there.
                 if (!o.forced && !gx_busy()) {
                     o.forced = true;
                     ++sync_stats.forced_tokens;
                     const int s = o.snapshot;
-                    gx_post([s] { backend->peek_snapshot_wait(s, true, 0, 0); });
+                    gx_post([s] { backend->wait_snapshot(s); });
                 }
                 if (!pump_scheduled) {
                     pump_scheduled = true;

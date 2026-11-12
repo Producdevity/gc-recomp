@@ -31,6 +31,8 @@ public:
     virtual bool peek_snapshot(int, bool, int, int, std::uint32_t&) const { return false; }
     // Backend's thread: the snapshot's value at (x, y), waiting for its readback.
     virtual std::uint32_t peek_snapshot_wait(int, bool depth, int x, int y) { return peek(depth, x, y); }
+    // Backend's thread: returns once the snapshot is read back, without reading a pixel.
+    virtual void wait_snapshot(int index) { (void)peek_snapshot_wait(index, true, 0, 0); }
 };
 
 // Token interrupts and the EFB reads of their handlers. Snapshot tokens are delivered once

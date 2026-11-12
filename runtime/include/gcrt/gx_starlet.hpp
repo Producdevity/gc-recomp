@@ -28,6 +28,7 @@ public:
     virtual bool snapshot_ready(int) const { return false; }
     virtual bool peek_snapshot(int, bool, int, int, std::uint32_t&) const { return false; }
     virtual std::uint32_t peek_snapshot_wait(int, bool depth, int x, int y) { return peek(depth, x, y); }
+    virtual void wait_snapshot(int index) { (void)peek_snapshot_wait(index, true, 0, 0); }
 };
 
 struct GxStats {

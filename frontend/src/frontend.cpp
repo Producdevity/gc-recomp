@@ -167,6 +167,7 @@ public:
     void release_snapshot(int index) override { inner_->release_snapshot(index); }
     bool snapshot_ready(int index) const override { return inner_->snapshot_ready(index); }
     bool peek_snapshot(int index, bool depth, int x, int y, std::uint32_t& value) const override {
+    void wait_snapshot(int index) override { r_.wait_snapshot(index); }
         return inner_->peek_snapshot(index, depth, x, y, value);
     }
     std::uint32_t peek_snapshot_wait(int index, bool depth, int x, int y) override {
@@ -199,6 +200,7 @@ struct Audio {
     SDL_AudioDeviceID device = 0;
     unsigned rate = 0;
     bool failed = false;
+    void wait_snapshot(int index) override { inner_->wait_snapshot(index); }
     void open(unsigned r) {
         if ((device && rate == r) || failed) return;
         if (device) SDL_CloseAudioDevice(device);

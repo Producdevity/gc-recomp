@@ -223,6 +223,7 @@ struct Backend final : GxBackend {
     std::uint32_t peek_snapshot_wait(int index, bool depth, int x, int y) override {
         return sink.renderer->peek_snapshot_wait(index, depth, x, y);
     }
+    void wait_snapshot(int index) override { sink.renderer->wait_snapshot(index); }
 };
 
 } // namespace
