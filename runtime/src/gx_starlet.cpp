@@ -224,6 +224,12 @@ struct Backend final : GxBackend {
         return sink.renderer->peek_snapshot_wait(index, depth, x, y);
     }
     void wait_snapshot(int index) override { sink.renderer->wait_snapshot(index); }
+    bool resident_in(std::uint32_t physical, std::uint32_t size) const override {
+        return sink.renderer && sink.renderer->resident_in(physical, size);
+    }
+    void before_dma(std::uint32_t physical, std::uint32_t size, bool write) override {
+        if (sink.renderer) sink.renderer->before_dma(physical, size, write);
+    }
 };
 
 } // namespace

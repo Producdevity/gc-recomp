@@ -89,6 +89,7 @@ struct DiscInterface final : Device {
             }
         }
         watch_dma("DI read", mar, length);
+        gx_before_dma(mar, length, true);
         ram_will_write(mar, length);
         if (!disc_read(offset, phys(mar), length)) fatal("disc read %llx+%x failed", (unsigned long long)offset, length);
     }

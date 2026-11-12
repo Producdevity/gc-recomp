@@ -342,6 +342,7 @@ struct ExternalInterface final : Device {
         unsigned rw = (c.cr >> 2) & 3;
         if (c.cr & 2) {
             if (!phys_ok(c.mar, c.length)) fatal("EXI DMA outside RAM: %08x+%x", c.mar, c.length);
+            gx_before_dma(c.mar, c.length, rw != 1);
             if (rw == 1) d->write(phys(c.mar), c.length);
             else {
                 watch_dma("EXI read", c.mar, c.length);

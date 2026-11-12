@@ -168,6 +168,11 @@ public:
         }
     }
     void wait_snapshot(int index) override { r_.wait_snapshot(index); }
+    bool resident_in(std::uint32_t physical, std::uint32_t size) const override { return r_.resident_in(phys(physical), size); }
+    void before_dma(std::uint32_t physical, std::uint32_t size, bool write) override {
+        if (write) r_.before_dma_write(phys(physical), size);
+        else r_.before_dma_read(phys(physical), size);
+    }
 
 private:
     sg::GlesRenderer& r_;
@@ -201,6 +206,8 @@ public:
         return inner_->peek_snapshot_wait(index, depth, x, y);
     }
     void wait_snapshot(int index) override { inner_->wait_snapshot(index); }
+    bool resident_in(std::uint32_t physical, std::uint32_t size) const override { return inner_->resident_in(physical, size); }
+    void before_dma(std::uint32_t physical, std::uint32_t size, bool write) override { inner_->before_dma(physical, size, write); }
 
 private:
     GxBackend* inner_;

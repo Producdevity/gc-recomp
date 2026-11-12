@@ -413,6 +413,11 @@ void gx_call(const std::function<void()>& task) {
     worker->drain();
 }
 
+void gx_before_dma(std::uint32_t physical, std::uint32_t size, bool write) {
+    if (!backend || !size || !backend->resident_in(physical, size)) return;
+    gx_call([physical, size, write] { backend->before_dma(physical, size, write); });
+}
+
 namespace {
 // Pixel-engine events found by the GX thread reach the guest at its next safepoint.
 void on_guest(std::function<void()> change) {

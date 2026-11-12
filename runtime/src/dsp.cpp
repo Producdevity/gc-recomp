@@ -192,6 +192,7 @@ struct DspInterface final : Device {
             watch_dma("ARAM to main", mm, length);
             gx_flush();
         }
+        gx_before_dma(mm, length, to_main);
         if (verbosity > 3) log("ARAM DMA %s main %08x aram %08x len %x mode %04x\n", to_main ? "->main" : "->aram", mm, ar, length, regs[0x12 / 2]);
         if (to_main && mm < 0x3100) log("ARAM DMA into low memory: %08x+%x from %08x\n", mm, length, ar);
         // 16 MiB of internal ARAM and no expansion. The size register's mode (2 MiB << mode)
@@ -244,6 +245,7 @@ struct DspInterface final : Device {
         std::uint32_t frames = bytes / 4;
         if (!frames) return;
         if (sink && phys_ok(address, bytes)) {
+            gx_before_dma(address, bytes, false);
             std::vector<std::int16_t> samples(frames * 2);
             const std::uint8_t* p = phys(address);
             for (std::uint32_t i = 0; i < frames * 2; ++i)

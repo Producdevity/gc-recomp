@@ -29,6 +29,9 @@ public:
     virtual bool peek_snapshot(int, bool, int, int, std::uint32_t&) const { return false; }
     virtual std::uint32_t peek_snapshot_wait(int, bool depth, int x, int y) { return peek(depth, x, y); }
     virtual void wait_snapshot(int index) { (void)peek_snapshot_wait(index, true, 0, 0); }
+    // Host DMA, as GxBackend describes it.
+    virtual bool resident_in(std::uint32_t physical, std::uint32_t size) const { (void)physical; (void)size; return false; }
+    virtual void before_dma(std::uint32_t physical, std::uint32_t size, bool write) { (void)physical; (void)size; (void)write; }
 };
 
 struct GxStats {

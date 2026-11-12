@@ -33,6 +33,12 @@ public:
     virtual std::uint32_t peek_snapshot_wait(int, bool depth, int x, int y) { return peek(depth, x, y); }
     // Backend's thread: returns once the snapshot is read back, without reading a pixel.
     virtual void wait_snapshot(int index) { (void)peek_snapshot_wait(index, true, 0, 0); }
+    // Any thread: whether results the backend keeps off RAM (resident texture copies) may
+    // cover [physical, physical + size).
+    virtual bool resident_in(std::uint32_t physical, std::uint32_t size) const { (void)physical; (void)size; return false; }
+    // Backend's thread, before host DMA reads (write false) or writes that range: a read
+    // writes those results back to RAM, a write drops them.
+    virtual void before_dma(std::uint32_t physical, std::uint32_t size, bool write) { (void)physical; (void)size; (void)write; }
 };
 
 // Token interrupts and the EFB reads of their handlers. Snapshot tokens are delivered once
@@ -57,6 +63,10 @@ bool gx_busy();   // the GX thread has queued or running work
 void gx_post(std::function<void()> task);
 // Runs a task on the backend's thread after the commands so far and waits for it.
 void gx_call(const std::function<void()>& task);
+// Host DMA (disc, ARAM, audio, EXI) is about to read (write false) or write guest RAM: when
+// the backend keeps results there off RAM, waits until it has settled them after the
+// commands so far.
+void gx_before_dma(std::uint32_t physical, std::uint32_t size, bool write);
 // Development: prints the GCRT_GX_TRACE history.
 void gx_trace_dump();
 
