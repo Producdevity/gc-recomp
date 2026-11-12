@@ -4,6 +4,7 @@ project(gc_recomp C CXX ASM)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
+set(GC_RECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # The recompiler runs on the build machine. Cross builds take a prebuilt one
 # through GC_RECOMPILER instead.

@@ -1,4 +1,4 @@
-set(GC_STARLET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../starlet" CACHE PATH "Starlet checkout")
+set(GC_STARLET_DIR "${GC_RECOMP_ROOT}/third_party/starlet" CACHE PATH "Starlet checkout")
 if(NOT TARGET starlet_gx)
     add_subdirectory("${GC_STARLET_DIR}" "${CMAKE_BINARY_DIR}/starlet" EXCLUDE_FROM_ALL)
 endif()

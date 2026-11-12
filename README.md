@@ -98,10 +98,10 @@ compare state and memory (`tests/gcbe_fuzz_*`).
 ## Building
 
 Host (macOS or Linux, AArch64): the recompiler, runtime, tests and a headless runner.
-The build expects Starlet next to this checkout (`GC_STARLET_DIR` points elsewhere):
+Starlet is a submodule in `third_party/starlet`; `-DGC_STARLET_DIR=...` uses another checkout.
 
 ```sh
-git clone --recurse-submodules https://github.com/Producdevity/starlet ../starlet
+git clone --recurse-submodules https://github.com/Producdevity/gc-recomp
 ```
 
 ```sh
