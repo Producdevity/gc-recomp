@@ -255,37 +255,4 @@ void gc_mtfsf(gc_ctx* c, uint32_t fm, uint32_t value) {
     }
 }
 
-static double quant_scale(uint32_t scale) {
-    int s = static_cast<int>(scale & 0x3F);
-    if (s & 0x20) s -= 64;
-    return std::ldexp(1.0, s);
-}
-
-double gc_dequantize(uint32_t raw, uint32_t type, uint32_t scale) {
-    double v;
-    switch (type) {
-    case 4: v = static_cast<uint8_t>(raw); break;
-    case 5: v = static_cast<uint16_t>(raw); break;
-    case 6: v = static_cast<int8_t>(raw); break;
-    case 7: v = static_cast<int16_t>(raw); break;
-    default: v = gc_u2f(raw); return v;
-    }
-    return static_cast<double>(static_cast<float>(v / quant_scale(scale)));
-}
-
-uint32_t gc_quantize(double value, uint32_t type, uint32_t scale) {
-    double v = static_cast<float>(value) * quant_scale(scale);
-    auto clamp = [&](double lo, double hi) {
-        if (v != v) return 0.0;
-        return v < lo ? lo : v > hi ? hi : v;
-    };
-    switch (type) {
-    case 4: return static_cast<uint32_t>(clamp(0, 255)) & 0xFF;
-    case 5: return static_cast<uint32_t>(clamp(0, 65535)) & 0xFFFF;
-    case 6: return static_cast<uint32_t>(static_cast<int32_t>(clamp(-128, 127))) & 0xFF;
-    case 7: return static_cast<uint32_t>(static_cast<int32_t>(clamp(-32768, 32767))) & 0xFFFF;
-    default: return gc_f2u(static_cast<float>(value));
-    }
-}
-
 } // extern "C"

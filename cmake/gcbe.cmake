@@ -14,7 +14,7 @@ add_library(gcbe_translator STATIC
     ${gcbe_root}/recompiler/image.cpp
     ${gcbe_root}/recompiler/ppc.cpp)
 target_include_directories(gcbe_translator PUBLIC ${gcbe_root}/recompiler ${gcbe_root}/backend/include
-    ${gcbe_root}/runtime/include)
+    ${gcbe_root}/runtime/include "${GC_STARLET_DIR}/include")
 target_compile_features(gcbe_translator PUBLIC cxx_std_17)
 
 add_executable(gcbe ${gcbe_root}/recompiler/gcbe_main.cpp)

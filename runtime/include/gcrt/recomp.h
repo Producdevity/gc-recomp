@@ -6,6 +6,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "starlet/compat/gqr.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -239,13 +241,26 @@ static inline void gc_dcbz(uint8_t* m, uint32_t ea) {
 }
 static inline void gc_dcbz_l(uint8_t* m, uint32_t ea) { gc_dcbz(m, ea); }
 
-/* Paired-single quantized loads and stores (GQR types 0 float, 4 u8, 5 u16, 6 s8, 7 s16). */
-double gc_dequantize(uint32_t raw, uint32_t type, uint32_t scale);
-uint32_t gc_quantize(double value, uint32_t type, uint32_t scale);
+/* Paired-single quantized loads and stores (GQR types 0 float, 4 u8, 5 u16, 6 s8, 7 s16).
+ * Values convert through Starlet's gqr.h; memory goes through the accessors above, so the
+ * write-gather pipe and MMIO still see quantized stores. Reserved types 1-3 move float bits. */
+static inline double gc_dequantize(uint32_t gqr, uint32_t type, uint32_t raw) {
+    if (type < 4) return (double)gc_u2f(raw);
+    const uint8_t b[2] = {(uint8_t)(raw >> 8), (uint8_t)raw};
+    return (double)gqr_load(gqr, (type == 4 || type == 6) ? b + 1 : b);
+}
+static inline uint32_t gc_quantize(uint32_t gqr, uint32_t type, double value) {
+    float f = (float)value;
+    if (type < 4) return gc_f2u(f);
+    if (f != f) return 0;
+    uint8_t b[2] = {0, 0};
+    gqr_store(gqr, b, f);
+    return (type == 4 || type == 6) ? b[0] : ((uint32_t)b[0] << 8 | b[1]);
+}
 
 static inline void gc_psq_l(gc_ctx* c, uint8_t* m, uint32_t ea, uint32_t w, uint32_t i, double* ps0, double* ps1) {
     uint32_t gqr = c->gqr[i];
-    uint32_t type = (gqr >> 16) & 7, scale = (gqr >> 24) & 0x3F;
+    uint32_t type = gqr_load_type(gqr);
     if (type == 0) {
         *ps0 = (double)gc_u2f(gc_ld32(m, ea));
         *ps1 = w ? 1.0 : (double)gc_u2f(gc_ld32(m, ea + 4));
@@ -253,28 +268,28 @@ static inline void gc_psq_l(gc_ctx* c, uint8_t* m, uint32_t ea, uint32_t w, uint
     }
     uint32_t size = (type == 4 || type == 6) ? 1 : 2;
     uint32_t a = size == 1 ? gc_ld8(m, ea) : gc_ld16(m, ea);
-    *ps0 = gc_dequantize(a, type, scale);
+    *ps0 = gc_dequantize(gqr, type, a);
     if (w) {
         *ps1 = 1.0;
     } else {
         uint32_t b = size == 1 ? gc_ld8(m, ea + 1) : gc_ld16(m, ea + 2);
-        *ps1 = gc_dequantize(b, type, scale);
+        *ps1 = gc_dequantize(gqr, type, b);
     }
 }
 
 static inline void gc_psq_st(gc_ctx* c, uint8_t* m, uint32_t ea, uint32_t w, uint32_t i, double ps0, double ps1) {
     uint32_t gqr = c->gqr[i];
-    uint32_t type = gqr & 7, scale = (gqr >> 8) & 0x3F;
+    uint32_t type = gqr_store_type(gqr);
     if (type == 0) {
         gc_st32(m, ea, gc_f2u((float)ps0));
         if (!w) gc_st32(m, ea + 4, gc_f2u((float)ps1));
         return;
     }
     uint32_t size = (type == 4 || type == 6) ? 1 : 2;
-    uint32_t a = gc_quantize(ps0, type, scale);
+    uint32_t a = gc_quantize(gqr, type, ps0);
     if (size == 1) gc_st8(m, ea, a); else gc_st16(m, ea, a);
     if (!w) {
-        uint32_t b = gc_quantize(ps1, type, scale);
+        uint32_t b = gc_quantize(gqr, type, ps1);
         if (size == 1) gc_st8(m, ea + 1, b); else gc_st16(m, ea + 2, b);
     }
 }
