@@ -5,7 +5,7 @@ ports contain no code from the game: at first launch the frontend translates the
 executable on the player's own disc straight to AArch64 (the gcbe backend) and caches the
 result; a C path (DOL -> C -> clang at build time) is the reference for differential
 testing. Both run over a model of the console's memory and hardware. Graphics go through
-[Starlet](../starlet), which decodes the GX command stream the game writes.
+[Starlet](https://github.com/Producdevity/starlet), which decodes the GX command stream the game writes.
 
 ## Layout
 
@@ -98,7 +98,11 @@ compare state and memory (`tests/gcbe_fuzz_*`).
 ## Building
 
 Host (macOS or Linux, AArch64): the recompiler, runtime, tests and a headless runner.
-Starlet's disc module needs its zstd submodule: `git -C ../starlet submodule update --init third_party/zstd`.
+The build expects Starlet next to this checkout (`GC_STARLET_DIR` points elsewhere):
+
+```sh
+git clone --recurse-submodules https://github.com/Producdevity/starlet ../starlet
+```
 
 ```sh
 cmake -S . -B build/host -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -125,6 +129,10 @@ decompilation projects (doldecomp/sms, Moddimation/Yasiki), which also document 
 DSP task and JAudio mail protocols. The test RVZ writer follows the format described in
 Dolphin's `docs/WiaAndRvz.md`. No code from Dolphin, DolRecomp, XenonRecomp, N64Recomp,
 WiiCompiled, Aurora or other ports is used.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
