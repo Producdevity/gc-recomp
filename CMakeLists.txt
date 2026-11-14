@@ -27,6 +27,19 @@ if(GC_FRONTEND)
     add_library(gcrt_frontend STATIC frontend/src/frontend.cpp)
     target_include_directories(gcrt_frontend PUBLIC frontend/include PRIVATE "${SDL2_INCLUDE_DIR}")
     target_link_libraries(gcrt_frontend PUBLIC gcrt starlet_gx_gles starlet::host "${SDL2_LIBRARY}")
+
+    # The settings menu and performance overlay (sbc-port-overlay), built in when its checkout exists.
+    set(SPO_DIR "${GC_RECOMP_ROOT}/third_party/sbc-port-overlay" CACHE PATH "sbc-port-overlay checkout")
+    if(EXISTS "${SPO_DIR}/CMakeLists.txt")
+        set(SPO_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(SPO_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(SPO_BUILD_SDL2 OFF CACHE BOOL "" FORCE)
+        add_subdirectory("${SPO_DIR}" sbc-port-overlay EXCLUDE_FROM_ALL)
+        # The SDL2 event adapter is one C file; compiling it here avoids the library's pkg-config lookup.
+        target_sources(gcrt_frontend PRIVATE "${SPO_DIR}/src/sdl2.c")
+        target_link_libraries(gcrt_frontend PUBLIC spo::static)
+        target_compile_definitions(gcrt_frontend PRIVATE PORT_HAS_OVERLAY)
+    endif()
 endif()
 
 option(GC_TESTS "Build gc-recomp tests" ${PROJECT_IS_TOP_LEVEL})

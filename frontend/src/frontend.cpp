@@ -15,6 +15,9 @@
 #include <starlet/host/controllers.hpp>
 #include <starlet/host/pad.hpp>
 #include <starlet/host/quit.hpp>
+#ifdef PORT_HAS_OVERLAY
+#include <spo.h>
+#endif
 #ifdef GCRT_WITH_GCBE
 #include "../../tools/nav.hpp"
 #include "a64_translate.hpp"
@@ -25,6 +28,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cmath>
 #include <cstdio>
@@ -90,9 +94,138 @@ void handle_quit() {
     host::exit_after_quit(std::chrono::milliseconds(500));
 }
 
+#ifdef PORT_HAS_OVERLAY
+// The settings menu and performance overlay (sbc-port-overlay). Its calls are serialized by
+// a mutex: events arrive on the thread that pumps SDL, frames on Starlet's GL thread.
+namespace overlay {
+
+std::timed_mutex mutex;
+std::atomic<bool> ready{false};
+std::atomic<bool> save_pending{false};
+std::atomic<bool> shutdown_requested{false};
+std::mutex done_mutex;
+std::condition_variable done_cv;
+bool done = false;
+// Opens the controllers SDL has announced, before the library sees their device-add event.
+std::function<void()> open_controllers;
+
+std::string exe_dir() {
+    char path[4096];
+    const ssize_t size = readlink("/proc/self/exe", path, sizeof path - 1);
+    if (size <= 0) return "./";
+    const std::string exe(path, static_cast<std::size_t>(size));
+    return exe.substr(0, exe.rfind('/') + 1);
+}
+
+void* resolve(const char* name, void*) { return SDL_GL_GetProcAddress(name); }
+
+// Menu closed: the settings are saved once, after the frame that closed it.
+void paused(std::uint32_t visible, void*) {
+    if (!visible) save_pending = true;
+}
+
+// GL thread, context current. Idempotent.
+void init(const char* title) {
+    static bool attempted = false;
+    if (attempted) return;
+    attempted = true;
+    static const std::string dir = exe_dir();
+    static const std::string conf = dir + "conf";
+    static const std::string path = conf + "/overlay.ini";
+    static std::string version = "unknown";
+    if (FILE* f = std::fopen((dir + "VERSION").c_str(), "r")) {
+        char line[81] = {};
+        if (std::fgets(line, sizeof line, f)) {
+            version = line;
+            while (!version.empty() && (version.back() == '\n' || version.back() == '\r')) version.pop_back();
+        }
+        std::fclose(f);
+    }
+    mkdir(conf.c_str(), 0755);
+    spo_config config = {};
+    config.struct_size = sizeof config;
+    config.abi_version = SPO_ABI_VERSION;
+    config.get_proc_address = resolve;
+    config.config_path = path.c_str();
+    config.port_name = title;
+    config.port_version = version.c_str();
+    config.on_pause = paused;
+    std::lock_guard<std::timed_mutex> lock(mutex);
+    const spo_result result = spo_init(&config);
+    if (result != SPO_OK) {
+        log("Overlay: unavailable (error %d)\n", int(result));
+        return;
+    }
+    ready = true;
+    log("Overlay: sbc-port-overlay %s, settings in %s\n", spo_version(), path.c_str());
+    starlet::host::on_quit([] {
+        if (!ready) return;
+        shutdown_requested = true;
+        std::unique_lock<std::mutex> wait(done_mutex);
+        if (done_cv.wait_for(wait, std::chrono::milliseconds(300), [] { return done; })) return;
+        // No frame presented in time: keep the settings, and let the process exit end the rest.
+        std::unique_lock<std::timed_mutex> lock(mutex, std::chrono::milliseconds(100));
+        if (lock.owns_lock() && ready && spo_config_dirty()) spo_config_save();
+    });
+}
+
+bool captured() {
+    if (!ready) return false;
+    std::lock_guard<std::timed_mutex> lock(mutex);
+    return ready && spo_input_captured();
+}
+
+void event(const SDL_Event& e) {
+    if (!ready) return;
+    if (e.type == SDL_CONTROLLERDEVICEADDED && open_controllers) open_controllers();
+    std::lock_guard<std::timed_mutex> lock(mutex);
+    if (ready) spo_handle_sdl_event(&e);
+}
+
+// GL thread, immediately before the buffer swap.
+void frame(SDL_Window* window) {
+    if (!ready) return;
+    int w = 0, h = 0;
+    SDL_GL_GetDrawableSize(window, &w, &h);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    static bool failed = false;
+    {
+        std::lock_guard<std::timed_mutex> lock(mutex);
+        if (!ready) return;
+        if (shutdown_requested) {
+            if (spo_config_dirty()) spo_config_save();
+            spo_shutdown();
+            ready = false;
+            log("Overlay: shut down\n");
+            {
+                std::lock_guard<std::mutex> signal(done_mutex);
+                done = true;
+            }
+            done_cv.notify_all();
+            return;
+        }
+        const spo_result result = spo_frame(static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h));
+        if (result != SPO_OK && !failed) {
+            failed = true;
+            log("Overlay: frame failed (error %d)\n", int(result));
+        }
+    }
+    if (save_pending.exchange(false)) {
+        std::lock_guard<std::timed_mutex> lock(mutex);
+        if (ready && spo_config_dirty() && spo_config_save() != SPO_OK) log("Overlay: cannot save settings (error %d)\n", int(spo_last_error()));
+    }
+}
+
+} // namespace overlay
+#endif
+
 // SDL's events on the thread that owns them; exits once a quit is requested.
 void poll_quit() {
+#ifdef PORT_HAS_OVERLAY
+    starlet::host::poll_events([](const SDL_Event& e) { overlay::event(e); });
+#else
     starlet::host::poll_events();
+#endif
     if (starlet::host::quit_requested()) starlet::host::exit_now(0);
 }
 
@@ -300,12 +433,19 @@ struct Pads {
         else if (script.active()) script.apply((now_ns() - start) / 1e9, p);
         return p;
     }
+    // After SDL_Init, on the thread that pumps SDL's events.
+    void open_controllers() {
+        if (!controllers) controllers = std::make_unique<starlet::host::Controllers>(1, [](const char* line) { log("%s\n", line); });
+        controllers->update();
+    }
     PadState sample() {
         PadState p;
         p.connected = true;
-        // After SDL_Init, on the thread that pumps SDL's events.
-        if (!controllers) controllers = std::make_unique<starlet::host::Controllers>(1, [](const char* line) { log("%s\n", line); });
-        controllers->update();
+        open_controllers();
+#ifdef PORT_HAS_OVERLAY
+        // The menu owns the controller and keyboard while it is open or draining held buttons.
+        if (overlay::captured()) return p;
+#endif
         static const starlet::host::GameCubeMapping layout = mapping();
         const auto pad = starlet::host::to_gamecube(controllers->state(0), layout);
         std::uint16_t b = pad.buttons;
@@ -530,6 +670,9 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
         });
     mkdir(saves.c_str(), 0755);
     mkdir(cache.c_str(), 0755);
+#ifdef PORT_HAS_OVERLAY
+    overlay::open_controllers = [&pads] { pads.open_controllers(); };
+#endif
 
     Display display(game.title, windowed);
     log("%s: GL renderer %s, %s\n", game.title, glGetString(GL_RENDERER), glGetString(GL_VERSION));
@@ -568,7 +711,11 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
     // Captures read the presented image back before it is swapped out, on the GL thread.
     static std::mutex capture_mutex;
     static std::string capture_path;
-    renderer.set_swap([&display] {
+    renderer.set_swap([&display, &game] {
+#ifdef PORT_HAS_OVERLAY
+        overlay::init(game.title);   // GL_INLINE runs: no submission thread bound the context
+        overlay::frame(display.window);
+#endif
         std::string path;
         {
             std::lock_guard<std::mutex> lock(capture_mutex);
@@ -600,10 +747,13 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
     // Decoding and recording run on the GX thread (GCRT_GX_INLINE=1: on the guest thread);
     // GL calls and swaps run on Starlet's submission thread (GCRT_GL_INLINE=1: inline).
     const bool gx_thread = !std::getenv("GCRT_GX_INLINE");
-    auto submission = [&display] {
+    auto submission = [&display, &game] {
         if (std::getenv("GCRT_GL_INLINE")) return;
-        renderer.start_submission([] {}, [&display] {
+        renderer.start_submission([] {}, [&display, &game] {
                                       SDL_GL_MakeCurrent(display.window, display.gl);
+#ifdef PORT_HAS_OVERLAY
+                                      overlay::init(game.title);
+#endif
                                       if (!gl_known) {
                                           gl_pthread = pthread_self();
                                           pthread_getcpuclockid(gl_pthread, &gl_clock);
