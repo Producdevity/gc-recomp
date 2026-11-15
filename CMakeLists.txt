@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 set(GC_RECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
+include(cmake/Profile.cmake)
 
 # The recompiler runs on the build machine. Cross builds take a prebuilt one
 # through GC_RECOMPILER instead.
@@ -27,6 +28,10 @@ if(GC_FRONTEND)
     add_library(gcrt_frontend STATIC frontend/src/frontend.cpp)
     target_include_directories(gcrt_frontend PUBLIC frontend/include PRIVATE "${SDL2_INCLUDE_DIR}")
     target_link_libraries(gcrt_frontend PUBLIC gcrt starlet_gx_gles starlet::host "${SDL2_LIBRARY}")
+    if(GC_PROFILE_GENERATE)
+        # The instrumented objects do not reference the runtime's start-up registration themselves.
+        target_link_options(gcrt_frontend PUBLIC -Wl,-u,__llvm_profile_runtime "${GC_PROFILE_RUNTIME}")
+    endif()
 
     # The settings menu and performance overlay (sbc-port-overlay), built in when its checkout exists.
     set(SPO_DIR "${GC_RECOMP_ROOT}/third_party/sbc-port-overlay" CACHE PATH "sbc-port-overlay checkout")

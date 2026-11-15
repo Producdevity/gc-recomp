@@ -80,6 +80,10 @@ std::atomic<std::uint64_t> gx_cpu_ns{0};
 // The frontend ends a port with SIGTERM, and gptokeyb's exit chord follows it with SIGKILL after
 // 3 s. The guest thread exits at its next retrace, or Starlet's quit thread does when the
 // guest has not within 500 ms; either saves the memory cards first.
+#ifdef GCRT_PROFILE_GENERATE
+extern "C" int __llvm_profile_write_file(void);
+#endif
+
 void handle_quit() {
     namespace host = starlet::host;
     host::install_quit_signals();
@@ -91,6 +95,10 @@ void handle_quit() {
             signal == SIGTERM ? "SIGTERM" : signal == SIGINT ? "SIGINT" : host::quit_requested() ? "quit requested" : "exit",
             (now_ns() - start) / 1e6);
     });
+#ifdef GCRT_PROFILE_GENERATE
+    // The process leaves through _Exit, which skips the profile runtime's exit handler.
+    host::on_quit([] { __llvm_profile_write_file(); });
+#endif
     host::exit_after_quit(std::chrono::milliseconds(500));
 }
 

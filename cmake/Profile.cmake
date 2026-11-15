@@ -1,0 +1,30 @@
+# Profile-guided optimization, opt-in. GC_PROFILE_GENERATE builds an instrumented frontend whose
+# exit path writes the profile (frontend/src/frontend.cpp); GC_PROFILE_USE builds with a merged
+# profile. Both leave the toolchain's flags intact and need Clang. The code a frontend translates
+# at run time is not part of the profile.
+set(GC_PROFILE_GENERATE OFF CACHE BOOL "Build an instrumented binary that writes a Clang profile at exit")
+set(GC_PROFILE_RUNTIME "" CACHE FILEPATH "Clang profile runtime for the target (libclang_rt.profile-aarch64.a), linked into the instrumented binary")
+set(GC_PROFILE_USE "" CACHE FILEPATH "Merged .profdata from instrumented runs of these sources")
+if(GC_PROFILE_GENERATE AND GC_PROFILE_USE)
+    message(FATAL_ERROR "GC_PROFILE_GENERATE and GC_PROFILE_USE are exclusive")
+endif()
+if(GC_PROFILE_GENERATE OR GC_PROFILE_USE)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "Profile-guided optimization needs Clang")
+    endif()
+endif()
+if(GC_PROFILE_GENERATE)
+    if(NOT EXISTS "${GC_PROFILE_RUNTIME}")
+        message(FATAL_ERROR "Set GC_PROFILE_RUNTIME to the target's libclang_rt.profile-aarch64.a")
+    endif()
+    add_compile_options(-fprofile-generate)
+    add_compile_definitions(GCRT_PROFILE_GENERATE)
+endif()
+if(GC_PROFILE_USE)
+    if(NOT EXISTS "${GC_PROFILE_USE}")
+        message(FATAL_ERROR "GC_PROFILE_USE does not exist: ${GC_PROFILE_USE}")
+    endif()
+    # Code the profile never reached is optimized as without it.
+    add_compile_options("-fprofile-use=${GC_PROFILE_USE}" -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${GC_PROFILE_USE}")
+endif()
