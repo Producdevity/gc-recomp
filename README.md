@@ -120,6 +120,13 @@ Ports add this directory with `add_subdirectory`, set `GC_FRONTEND=ON` and
 `STARLET_GLES=ON`, and call `gc_recompile(target DISC game.iso SYMBOLS ... CONFIG ...)`.
 Cross builds pass a host-built `gcrecomp` as `RECOMPILER`.
 
+Profile-guided optimization is opt-in. Build an instrumented frontend with
+`-DGC_PROFILE_GENERATE=ON -DGC_PROFILE_RUNTIME=.../libclang_rt.profile-aarch64.a`, run it on
+a device with `LLVM_PROFILE_FILE=/tmp/NAME.profraw`, merge the `.profraw` files with
+`llvm-profdata merge -o FILE.profdata`, then build with `-DGC_PROFILE_USE=FILE.profdata`. The
+frontend writes its profile when it exits (`--seconds` or a frontend quit). Code a frontend
+translates at run time is not part of the profile.
+
 ## Sources
 
 Independent implementation. Instruction semantics follow the PowerPC architecture and
