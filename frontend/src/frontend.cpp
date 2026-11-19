@@ -164,6 +164,8 @@ void init(const char* title) {
         log("Overlay: unavailable (error %d)\n", int(result));
         return;
     }
+    // Luigi's Mansion and Super Mario Sunshine present a new frame every 2 retraces.
+    spo_target_fps_set(30);
     ready = true;
     log("Overlay: sbc-port-overlay %s, settings in %s\n", spo_version(), path.c_str());
     starlet::host::on_quit([] {
