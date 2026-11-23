@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 namespace gcrt {
 namespace {
@@ -91,8 +92,13 @@ struct DiscInterface final : Device {
         watch_dma("DI read", mar, length);
         gx_before_dma(mar, length, true);
         ram_will_write(mar, length);
-        if (!disc_read(offset, phys(mar), length)) fatal("disc read %llx+%x failed", (unsigned long long)offset, length);
+        // The kernel cannot write a page another thread write-protected after ram_will_write
+        // (pread fails with EFAULT), so the read lands in host memory and is copied.
+        bounce.resize(length);
+        if (!disc_read(offset, bounce.data(), length)) fatal("disc read %llx+%x failed", (unsigned long long)offset, length);
+        std::memcpy(phys(mar), bounce.data(), length);
     }
+    std::vector<std::uint8_t> bounce;
 
     // Drive timing: games pace loading by it and some reuse buffers on that assumption.
     // A seek when the read does not continue the previous one, then about 3 MB/s.
