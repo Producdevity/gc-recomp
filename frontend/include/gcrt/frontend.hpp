@@ -3,6 +3,8 @@
 
 #include "gcrt/program.hpp"
 
+#include <cstdint>
+
 namespace gcrt {
 
 struct GameInfo {
@@ -13,6 +15,11 @@ struct GameInfo {
     // disc's executable with at first launch (paths relative to the working directory).
     const char* symbols = nullptr;
     const char* config = nullptr;
+    // Game thread, at every retrace after input is polled; guest RAM is consistent here.
+    void (*retrace)(std::uint64_t field) = nullptr;
+    // Once the overlay is up, on the GL thread with the overlay's lock held: sbc-port-overlay
+    // calls such as spo_screen_open are allowed. Not called without the overlay.
+    void (*overlay_ready)() = nullptr;
 };
 
 // Command line:

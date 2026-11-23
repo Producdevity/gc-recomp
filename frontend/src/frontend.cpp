@@ -133,7 +133,7 @@ void paused(std::uint32_t visible, void*) {
 }
 
 // GL thread, context current. Idempotent.
-void init(const char* title) {
+void init(const char* title, void (*on_ready)()) {
     static bool attempted = false;
     if (attempted) return;
     attempted = true;
@@ -167,6 +167,7 @@ void init(const char* title) {
     // Luigi's Mansion and Super Mario Sunshine present a new frame every 2 retraces.
     spo_target_fps_set(30);
     ready = true;
+    if (on_ready) on_ready();
     log("Overlay: sbc-port-overlay %s, settings in %s\n", spo_version(), path.c_str());
     starlet::host::on_quit([] {
         if (!ready) return;
@@ -723,7 +724,7 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
     static std::string capture_path;
     renderer.set_swap([&display, &game] {
 #ifdef PORT_HAS_OVERLAY
-        overlay::init(game.title);   // GL_INLINE runs: no submission thread bound the context
+        overlay::init(game.title, game.overlay_ready);   // GL_INLINE runs: no submission thread bound the context
         overlay::frame(display.window);
 #endif
         std::string path;
@@ -762,7 +763,7 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
         renderer.start_submission([] {}, [&display, &game] {
                                       SDL_GL_MakeCurrent(display.window, display.gl);
 #ifdef PORT_HAS_OVERLAY
-                                      overlay::init(game.title);
+                                      overlay::init(game.title, game.overlay_ready);
 #endif
                                       if (!gl_known) {
                                           gl_pthread = pthread_self();
@@ -816,6 +817,7 @@ int run_frontend(const GameInfo& game, int argc, char** argv) {
         }
         poll_quit();
         pads.update();
+        if (game.retrace) game.retrace(field);
         gx_flush();
         if (!capture.empty() && field % capture_every == 0) {
             char name[64];
