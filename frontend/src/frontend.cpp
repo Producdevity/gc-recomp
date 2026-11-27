@@ -157,6 +157,7 @@ void init(const char* title, void (*on_ready)()) {
     config.config_path = path.c_str();
     config.port_name = title;
     config.port_version = version.c_str();
+    config.port_author = "Producdevity";
     config.on_pause = paused;
     std::lock_guard<std::timed_mutex> lock(mutex);
     const spo_result result = spo_init(&config);
